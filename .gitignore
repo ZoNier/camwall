@@ -5,3 +5,5 @@ venv/
 *.log
 .env
 playlist.local.json
+
+settings.json
