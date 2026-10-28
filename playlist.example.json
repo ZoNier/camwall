@@ -1,0 +1,18 @@
+{
+  "cameras": [
+    {
+      "name": "CAM 1",
+      "url": "rtsp://USER:PASSWORD@192.168.1.101/stream1",
+      "favorite": false,
+      "country_name": "Приклад локації",
+      "enabled": true
+    },
+    {
+      "name": "CAM 2",
+      "url": "rtsp://USER:PASSWORD@192.168.1.102/stream1",
+      "favorite": false,
+      "country_name": "Приклад локації",
+      "enabled": true
+    }
+  ]
+}
