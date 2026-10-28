@@ -1,0 +1,24 @@
+[Unit]
+Description=CamWall RTSP Web Video Wall
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=camwall
+Group=camwall
+WorkingDirectory=/opt/camwall
+Environment=PYTHONUNBUFFERED=1
+Environment=CAMWALL_CONFIG=/opt/camwall/playlist.json
+Environment=CAMWALL_FFMPEG=/usr/bin/ffmpeg
+ExecStart=/opt/camwall/venv/bin/uvicorn app:app --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/camwall
+
+[Install]
+WantedBy=multi-user.target
