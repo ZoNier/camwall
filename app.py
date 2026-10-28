@@ -143,7 +143,7 @@ class StreamHub:
 
             args = [FFMPEG, "-hide_banner", "-loglevel", "warning", "-nostdin",
                     "-rtsp_transport", "tcp", "-fflags", "nobuffer", "-flags", "low_delay",
-                    "-analyzeduration", "1000000", "-probesize", "1000000", "-i", url,
+                    "-analyzeduration", "1000000", "-probesize", "1000000", "-i", camera.url,
                     "-map", "0:v:0",
                     "-vf", "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fps=10",
                     "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
