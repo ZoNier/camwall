@@ -25,6 +25,7 @@ log = logging.getLogger("camwall")
 class Camera(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     url: str = Field(min_length=8, max_length=2048)
+    low_res_url: str | None = Field(default=None, max_length=2048)
     favorite: bool = False
     country_name: str | None = None
     enabled: bool = True
@@ -53,6 +54,8 @@ def load_config() -> ConfigModel:
         for index, camera in enumerate(config.cameras, 1):
             if not camera.url.startswith(("rtsp://", "rtsps://")):
                 raise ValueError(f"Camera #{index}: URL must start with rtsp:// or rtsps://")
+            if camera.low_res_url and not camera.low_res_url.startswith(("rtsp://", "rtsps://")):
+                raise ValueError(f"Camera #{index}: low_res_url must start with rtsp:// or rtsps://")
         return config
     except (OSError, json.JSONDecodeError, ValidationError, ValueError) as exc:
         raise RuntimeError(f"Cannot load {CONFIG_PATH}: {exc}") from exc
@@ -112,7 +115,10 @@ class StreamHub:
                 settings = config.settings
                 if not camera.enabled:
                     return
-                url = camera.url
+                # Prefer the camera's native low-resolution/substream when configured.
+                # This avoids software transcoding and is the cheapest way to display
+                # many cameras at once.
+                url = camera.low_res_url or camera.url
 
             args = [FFMPEG, "-hide_banner", "-loglevel", "warning", "-nostdin",
                     "-rtsp_transport", "tcp", "-fflags", "nobuffer", "-flags", "low_delay",
@@ -212,6 +218,8 @@ async def put_config(payload: dict[str, Any]):
         for index, camera in enumerate(candidate.cameras, 1):
             if not camera.url.startswith(("rtsp://", "rtsps://")):
                 raise ValueError(f"Camera #{index}: URL must start with rtsp:// or rtsps://")
+            if camera.low_res_url and not camera.low_res_url.startswith(("rtsp://", "rtsps://")):
+                raise ValueError(f"Camera #{index}: low_res_url must start with rtsp:// or rtsps://")
     except (ValidationError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     async with config_lock:
