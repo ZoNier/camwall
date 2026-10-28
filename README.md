@@ -32,7 +32,7 @@ sudo systemctl status camwall
 
 ```bash
 cd ~/camwall
-./update.sh
+bash update.sh
 ```
 
 Скрипт виконує `git pull --ff-only`, копіює оновлені файли до `/opt/camwall`, оновлює залежності Python, перечитує конфігурацію systemd і перезапускає сервіс. Він **не перезаписує** `/opt/camwall/playlist.json`, тому налаштування камер збережуться. Якщо в Git-клоні є незакомічені локальні зміни, оновлення зупиниться, щоб не затерти їх.
