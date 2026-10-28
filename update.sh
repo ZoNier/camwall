@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # Run this script as the normal user who owns the Git checkout:
-#   ./update.sh
+#   bash update.sh
 # sudo is used only for deployment operations.
 
 REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,7 +11,7 @@ SERVICE="${CAMWALL_SERVICE:-camwall}"
 
 if [[ $EUID -eq 0 ]]; then
   echo "Запусти без sudo від користувача, який має Git-клон:"
-  echo "  ./update.sh"
+  echo "  bash update.sh"
   exit 1
 fi
 
@@ -19,7 +19,7 @@ command -v git >/dev/null || { echo "Помилка: git не встановле
 command -v sudo >/dev/null || { echo "Помилка: sudo не встановлено."; exit 1; }
 git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null
 
-if [[ -n "$(git -C "$REPO_DIR" status --porcelain)" ]]; then
+if [[ -n "$(git -C "$REPO_DIR" status --porcelain -- . ':(exclude)playlist.json')" ]]; then
   echo "Помилка: у Git-клоні є локальні зміни."
   echo "Збережи їх або прибери перед оновленням, щоб update не затер твою роботу."
   exit 1
