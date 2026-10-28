@@ -10,16 +10,14 @@
   "cameras": [
     {
       "name": "CAM 1",
-      "url": "rtsp://CAMERA_1_HOST/main",
-      "low_res_url": "rtsp://CAMERA_1_HOST/sub",
+      "url": "rtsp://USER:PASSWORD@192.168.1.101/stream1",
       "favorite": false,
       "country_name": "Приклад локації",
       "enabled": true
     },
     {
       "name": "CAM 2",
-      "url": "rtsp://CAMERA_2_HOST/main",
-      "low_res_url": "rtsp://CAMERA_2_HOST/sub",
+      "url": "rtsp://USER:PASSWORD@192.168.1.102/stream1",
       "favorite": false,
       "country_name": "Приклад локації",
       "enabled": true
