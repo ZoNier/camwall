@@ -1,0 +1,8 @@
+{
+  "grid_columns": 4,
+  "theme": "dark",
+  "autoplay": true,
+  "low_latency": true,
+  "reconnect_seconds": 3,
+  "stream_audio": false
+}
