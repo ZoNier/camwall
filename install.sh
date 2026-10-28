@@ -19,7 +19,12 @@ fi
 install -d -o camwall -g camwall -m 0750 "$INSTALL_DIR" "$INSTALL_DIR/static"
 install -o camwall -g camwall -m 0640 "$APP_DIR/app.py" "$INSTALL_DIR/app.py"
 install -o camwall -g camwall -m 0640 "$APP_DIR/requirements.txt" "$INSTALL_DIR/requirements.txt"
-install -o camwall -g camwall -m 0600 "$APP_DIR/playlist.json" "$INSTALL_DIR/playlist.json"
+if [[ ! -f "$INSTALL_DIR/playlist.json" ]]; then
+  install -o camwall -g camwall -m 0600 "$APP_DIR/playlist.json" "$INSTALL_DIR/playlist.json"
+fi
+if [[ ! -f "$INSTALL_DIR/settings.json" ]]; then
+  install -o camwall -g camwall -m 0600 "$APP_DIR/settings.example.json" "$INSTALL_DIR/settings.json"
+fi
 install -o camwall -g camwall -m 0640 "$APP_DIR/static/index.html" "$INSTALL_DIR/static/index.html"
 install -o root -g root -m 0644 "$APP_DIR/static/favicon.svg" "$INSTALL_DIR/static/favicon.svg"
 
@@ -33,7 +38,8 @@ systemctl enable camwall
 
 echo
 echo "Встановлення завершено."
-echo "Перевір конфігурацію: $INSTALL_DIR/playlist.json"
+echo "Камери: $INSTALL_DIR/playlist.json"
+echo "Налаштування UI: $INSTALL_DIR/settings.json"
 echo "Запуск: sudo systemctl start camwall"
 echo "Логи: sudo journalctl -u camwall -f"
 echo "Web UI: http://IP_СЕРВЕРА:8080"
