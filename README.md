@@ -1,0 +1,82 @@
+# CamWall
+
+Мінімалістична вебвідеостіна для RTSP-камер на Debian / Armbian. FFmpeg читає RTSP і передає MPEG-TS через WebSocket, а браузер відтворює потік через mpegts.js / Media Source Extensions.
+
+## Можливості
+
+- Адаптивна сітка камер, пошук, обрані камери та повноекранний режим браузера.
+- Додавання/редагування/видалення камер через вебналаштування.
+- Збереження камер і параметрів сітки у \`playlist.json\`.
+- Один FFmpeg-процес на камеру, спільний для кількох глядачів.
+- Перепідключення після розриву, systemd-сервіс, без Docker, БД або MediaMTX.
+
+## Встановлення
+
+На Debian / Armbian:
+
+\`\`\`bash
+git clone https://github.com/ZoNier/camwall.git
+cd camwall
+# Відредагуй playlist.json і вкажи RTSP URL своїх камер.
+sudo bash install.sh
+sudo systemctl start camwall
+sudo systemctl status camwall
+\`\`\`
+
+Відкрий \`http://IP_СЕРВЕРА:8080\`. Після інсталяції робочий конфігураційний файл: \`/opt/camwall/playlist.json\`.
+
+Для ручного запуску без інсталятора:
+
+\`\`\`bash
+sudo apt install python3-venv ffmpeg
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app:app --host 0.0.0.0 --port 8080
+\`\`\`
+
+## Налаштування playlist.json
+
+\`\`\`json
+{
+  "settings": {
+    "grid_columns": 4,
+    "theme": "dark",
+    "autoplay": true,
+    "low_latency": true,
+    "reconnect_seconds": 3,
+    "stream_audio": false
+  },
+  "cameras": [
+    {
+      "name": "CAM 1",
+      "url": "rtsp://USER:PASSWORD@192.168.1.101/stream1",
+      "favorite": false,
+      "country_name": null,
+      "enabled": true
+    }
+  ]
+}
+\`\`\`
+
+Також підтримується початковий формат, де кореневий елемент JSON — масив камер. При збереженні через UI файл переходить до формату з \`settings\` і \`cameras\`.
+
+## Безпека
+
+**Ця версія не має автентифікації.** API налаштувань повертає RTSP URL, зокрема облікові дані, браузеру для редагування. Не виставляй порт 8080 в інтернет. Обмеж доступ firewall-ом до довіреної LAN або додай авторизований reverse proxy. Не коміть реальні URL/паролі камер у публічний Git. У репозиторії \`playlist.json\` містить лише демонстраційні адреси.
+
+## Затримка, кодеки та ресурси
+
+MPEG-TS через WebSocket уникає сегментної затримки HLS, але затримка менш як 1 секунда не гарантується: вона залежить від камери, GOP, мережі, браузерного буфера та кодека. H.264 зазвичай має найкращу сумісність; підтримка H.265/HEVC у браузерах обмежена. Якщо можливо, налаштуй H.264 субпотік на камері. Для 8–16 камер перевір CPU, мережеву пропускну здатність і стабільність саме на своєму обладнанні.
+
+Для першого відкриття сторінки потрібен доступ до CDN \`cdn.jsdelivr.net\` для завантаження mpegts.js.
+
+## Діагностика
+
+\`\`\`bash
+curl http://127.0.0.1:8080/health
+sudo journalctl -u camwall -f
+ffmpeg -hide_banner -rtsp_transport tcp -i 'rtsp://USER:PASS@CAMERA/PATH' -t 5 -f null -
+\`\`\`
+
+Не вставляй RTSP URL із паролем у публічні логи чи звернення до підтримки.
