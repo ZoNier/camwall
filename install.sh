@@ -10,7 +10,7 @@ APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="/opt/camwall"
 
 apt-get update
-apt-get install -y python3 python3-venv python3-pip ffmpeg ca-certificates
+apt-get install -y git python3 python3-venv python3-pip ffmpeg ca-certificates
 
 if ! id camwall >/dev/null 2>&1; then
   useradd --system --home-dir "$INSTALL_DIR" --shell /usr/sbin/nologin camwall
@@ -29,6 +29,7 @@ if [[ ! -f "$INSTALL_DIR/settings.json" ]]; then
 fi
 install -o camwall -g camwall -m 0640 "$APP_DIR/static/index.html" "$INSTALL_DIR/static/index.html"
 install -o root -g root -m 0644 "$APP_DIR/static/favicon.svg" "$INSTALL_DIR/static/favicon.svg"
+install -o root -g root -m 0750 "$APP_DIR/update.sh" "$INSTALL_DIR/update.sh"
 
 python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/pip" install --upgrade pip
