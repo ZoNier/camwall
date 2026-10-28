@@ -21,6 +21,7 @@ install -o camwall -g camwall -m 0640 "$APP_DIR/app.py" "$INSTALL_DIR/app.py"
 install -o camwall -g camwall -m 0640 "$APP_DIR/requirements.txt" "$INSTALL_DIR/requirements.txt"
 install -o camwall -g camwall -m 0600 "$APP_DIR/playlist.json" "$INSTALL_DIR/playlist.json"
 install -o camwall -g camwall -m 0640 "$APP_DIR/static/index.html" "$INSTALL_DIR/static/index.html"
+install -o root -g root -m 0644 "$APP_DIR/static/favicon.svg" "$INSTALL_DIR/static/favicon.svg"
 
 python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/pip" install --upgrade pip
