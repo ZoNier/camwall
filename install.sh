@@ -20,7 +20,9 @@ install -d -o camwall -g camwall -m 0750 "$INSTALL_DIR" "$INSTALL_DIR/static"
 install -o camwall -g camwall -m 0640 "$APP_DIR/app.py" "$INSTALL_DIR/app.py"
 install -o camwall -g camwall -m 0640 "$APP_DIR/requirements.txt" "$INSTALL_DIR/requirements.txt"
 if [[ ! -f "$INSTALL_DIR/playlist.json" ]]; then
-  install -o camwall -g camwall -m 0600 "$APP_DIR/playlist.json" "$INSTALL_DIR/playlist.json"
+  if [[ ! -f "$INSTALL_DIR/playlist.json" ]]; then
+  install -o camwall -g camwall -m 0600 "$APP_DIR/playlist.example.json" "$INSTALL_DIR/playlist.json"
+fi
 fi
 if [[ ! -f "$INSTALL_DIR/settings.json" ]]; then
   install -o camwall -g camwall -m 0600 "$APP_DIR/settings.example.json" "$INSTALL_DIR/settings.json"
