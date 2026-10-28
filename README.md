@@ -6,7 +6,7 @@
 
 - Адаптивна сітка камер, пошук, обрані камери та повноекранний режим браузера.
 - Додавання/редагування/видалення камер через вебналаштування.
-- Збереження камер і параметрів сітки у \`playlist.json\`.
+- Окремі файли конфігурації: `playlist.json` для камер і `settings.json` для налаштувань інтерфейсу.
 - Один FFmpeg-процес на камеру, спільний для кількох глядачів.
 - Серверне зменшення роздільності/FPS і перекодування в H.264 з обмеженням бітрейту.
 - Перепідключення після розриву, systemd-сервіс, без Docker, БД або MediaMTX.
@@ -18,7 +18,6 @@
 \`\`\`bash
 git clone https://github.com/ZoNier/camwall.git
 cd camwall
-# Відредагуй playlist.json і вкажи RTSP URL своїх камер.
 sudo bash install.sh
 sudo systemctl start camwall
 sudo systemctl status camwall
@@ -35,7 +34,7 @@ cd ~/camwall
 bash update.sh
 ```
 
-Скрипт виконує `git pull --ff-only`, копіює оновлені файли до `/opt/camwall`, оновлює залежності Python, перечитує конфігурацію systemd і перезапускає сервіс. Він **не перезаписує** `/opt/camwall/playlist.json`, тому налаштування камер збережуться. Якщо в Git-клоні є незакомічені локальні зміни, оновлення зупиниться, щоб не затерти їх.
+Скрипт перевіряє GitHub і завершується без перезапуску, якщо нових комітів немає. Якщо зміни є — виконує `git pull --ff-only`, встановлює файли, оновлює залежності Python і перезапускає сервіс. Він не копіює робочі `playlist.json` та `settings.json` з репозиторію, тому камери й налаштування інтерфейсу зберігаються. Незакомічені зміни в інших файлах клону зупинять оновлення.
 
 Для ручного запуску без інсталятора:
 
@@ -47,18 +46,17 @@ pip install -r requirements.txt
 uvicorn app:app --host 0.0.0.0 --port 8080
 \`\`\`
 
-## Налаштування playlist.json
+## Конфігурація
 
-\`\`\`json
+Робочі конфігураційні файли зберігаються окремо в `/opt/camwall/`:
+
+- `playlist.json` — **лише список камер** та їхні RTSP URL. Початковий приклад у репозиторії: `playlist.example.json`.
+- `settings.json` — параметри вебінтерфейсу. Початковий шаблон у репозиторії: `settings.example.json`.
+
+Приклад `playlist.json`:
+
+```json
 {
-  "settings": {
-    "grid_columns": 4,
-    "theme": "dark",
-    "autoplay": true,
-    "low_latency": true,
-    "reconnect_seconds": 3,
-    "stream_audio": false
-  },
   "cameras": [
     {
       "name": "CAM 1",
@@ -69,9 +67,22 @@ uvicorn app:app --host 0.0.0.0 --port 8080
     }
   ]
 }
-\`\`\`
+```
 
-Також підтримується початковий формат, де кореневий елемент JSON — масив камер. При збереженні через UI файл переходить до формату з \`settings\` і \`cameras\`.
+Приклад `settings.json`:
+
+```json
+{
+  "grid_columns": 4,
+  "theme": "dark",
+  "autoplay": true,
+  "low_latency": true,
+  "reconnect_seconds": 3,
+  "stream_audio": false
+}
+```
+
+Робочі файли `playlist.json` і `settings.json` ігноруються Git. Оновлення застосунку не замінює їх. Якщо стара версія зберігала параметри інтерфейсу й камери разом у `playlist.json`, нова версія перенесе налаштування в `settings.json`, а список камер залишить у `playlist.json`.
 
 ## Безпека
 
