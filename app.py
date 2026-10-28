@@ -25,7 +25,6 @@ log = logging.getLogger("camwall")
 class Camera(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     url: str = Field(min_length=8, max_length=2048)
-    low_res_url: str | None = Field(default=None, max_length=2048)
     favorite: bool = False
     country_name: str | None = None
     enabled: bool = True
@@ -54,8 +53,6 @@ def load_config() -> ConfigModel:
         for index, camera in enumerate(config.cameras, 1):
             if not camera.url.startswith(("rtsp://", "rtsps://")):
                 raise ValueError(f"Camera #{index}: URL must start with rtsp:// or rtsps://")
-            if camera.low_res_url and not camera.low_res_url.startswith(("rtsp://", "rtsps://")):
-                raise ValueError(f"Camera #{index}: low_res_url must start with rtsp:// or rtsps://")
         return config
     except (OSError, json.JSONDecodeError, ValidationError, ValueError) as exc:
         raise RuntimeError(f"Cannot load {CONFIG_PATH}: {exc}") from exc
@@ -115,15 +112,15 @@ class StreamHub:
                 settings = config.settings
                 if not camera.enabled:
                     return
-                # Prefer the camera's native low-resolution/substream when configured.
-                # This avoids software transcoding and is the cheapest way to display
-                # many cameras at once.
-                url = camera.low_res_url or camera.url
 
             args = [FFMPEG, "-hide_banner", "-loglevel", "warning", "-nostdin",
                     "-rtsp_transport", "tcp", "-fflags", "nobuffer", "-flags", "low_delay",
                     "-analyzeduration", "1000000", "-probesize", "1000000", "-i", url,
-                    "-map", "0:v:0", "-c:v", "copy"]
+                    "-map", "0:v:0",
+                    "-vf", "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fps=10",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                    "-pix_fmt", "yuv420p", "-b:v", "500k", "-maxrate", "600k",
+                    "-bufsize", "300k", "-g", "20", "-keyint_min", "10"]
             args += ["-map", "0:a:0?"] if settings.stream_audio else ["-an"]
             args += ["-muxdelay", "0", "-muxpreload", "0", "-mpegts_flags", "+resend_headers",
                      "-flush_packets", "1", "-f", "mpegts", "pipe:1"]
@@ -218,8 +215,6 @@ async def put_config(payload: dict[str, Any]):
         for index, camera in enumerate(candidate.cameras, 1):
             if not camera.url.startswith(("rtsp://", "rtsps://")):
                 raise ValueError(f"Camera #{index}: URL must start with rtsp:// or rtsps://")
-            if camera.low_res_url and not camera.low_res_url.startswith(("rtsp://", "rtsps://")):
-                raise ValueError(f"Camera #{index}: low_res_url must start with rtsp:// or rtsps://")
     except (ValidationError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     async with config_lock:
