@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = Path(os.getenv("CAMWALL_CONFIG", str(BASE_DIR / "playlist.json")))
+SETTINGS_PATH = Path(os.getenv("CAMWALL_SETTINGS", str(BASE_DIR / "settings.json")))
 WEB_DIR = BASE_DIR / "static"
 FFMPEG = os.getenv("CAMWALL_FFMPEG", "ffmpeg")
 logging.basicConfig(level=os.getenv("CAMWALL_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -44,26 +45,53 @@ class ConfigModel(BaseModel):
     cameras: list[Camera] = Field(default_factory=list)
 
 
+def _atomic_write_json(path: Path, data: Any, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(tmp, mode)
+    tmp.replace(path)
+
+
 def load_config() -> ConfigModel:
     try:
         raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        legacy_settings: dict[str, Any] = {}
         if isinstance(raw, list):
-            raw = {"settings": {}, "cameras": raw}
-        config = ConfigModel.model_validate(raw)
-        for index, camera in enumerate(config.cameras, 1):
+            cameras_raw = raw
+        elif isinstance(raw, dict):
+            cameras_raw = raw.get("cameras", [])
+            legacy_settings = raw.get("settings", {}) or {}
+        else:
+            raise ValueError("playlist.json must contain a camera list or an object with cameras")
+
+        # Migrate settings from the old combined playlist format only when no
+        # separate settings.json exists. Existing user settings always win.
+        if SETTINGS_PATH.exists():
+            settings_raw = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        else:
+            settings = Settings.model_validate(legacy_settings)
+            _atomic_write_json(SETTINGS_PATH, settings.model_dump(), 0o600)
+            settings_raw = settings.model_dump()
+
+        settings = Settings.model_validate(settings_raw)
+        cameras = [Camera.model_validate(item) for item in cameras_raw]
+        for index, camera in enumerate(cameras, 1):
             if not camera.url.startswith(("rtsp://", "rtsps://")):
                 raise ValueError(f"Camera #{index}: URL must start with rtsp:// or rtsps://")
-        return config
+
+        # Normalize old combined playlist format without losing camera entries.
+        if not isinstance(raw, dict) or "settings" in raw or "cameras" not in raw:
+            _atomic_write_json(CONFIG_PATH, {"cameras": [c.model_dump() for c in cameras]}, 0o600)
+
+        return ConfigModel(settings=settings, cameras=cameras)
     except (OSError, json.JSONDecodeError, ValidationError, ValueError) as exc:
-        raise RuntimeError(f"Cannot load {CONFIG_PATH}: {exc}") from exc
+        raise RuntimeError(f"Cannot load CamWall configuration: {exc}") from exc
 
 
 def save_config(config: ConfigModel) -> None:
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = CONFIG_PATH.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(config.model_dump(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.chmod(tmp, 0o600)
-    tmp.replace(CONFIG_PATH)
+    _atomic_write_json(SETTINGS_PATH, config.settings.model_dump(), 0o600)
+    _atomic_write_json(CONFIG_PATH, {"cameras": [camera.model_dump() for camera in config.cameras]}, 0o600)
 
 
 config = ConfigModel()
