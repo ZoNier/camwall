@@ -43,18 +43,21 @@ fi
 
 git -C "$REPO_DIR" pull --ff-only
 
-for file in app.py requirements.txt settings.example.json static/index.html static/favicon.svg systemd/camwall.service; do
+for file in app.py requirements.txt settings.example.json playlist.example.json static/index.html static/favicon.svg systemd/camwall.service; do
   if [[ ! -f "$REPO_DIR/$file" ]]; then
     echo "Помилка: у репозиторії немає $file"
     exit 1
   fi
 done
 
-echo "Встановлюю файли в $INSTALL_DIR (локальні налаштування не перезаписуються)..."
+echo "Встановлюю файли в $INSTALL_DIR (локальні дані не перезаписуються)..."
+sudo install -d -o camwall -g camwall -m 0750 "$INSTALL_DIR" "$INSTALL_DIR/static"
+if ! sudo test -f "$INSTALL_DIR/playlist.json"; then
+  sudo install -o camwall -g camwall -m 0600 "$REPO_DIR/playlist.example.json" "$INSTALL_DIR/playlist.json"
+fi
 if ! sudo test -f "$INSTALL_DIR/settings.json"; then
   sudo install -o camwall -g camwall -m 0600 "$REPO_DIR/settings.example.json" "$INSTALL_DIR/settings.json"
 fi
-sudo install -d -o camwall -g camwall -m 0750 "$INSTALL_DIR" "$INSTALL_DIR/static"
 sudo install -o camwall -g camwall -m 0640 "$REPO_DIR/app.py" "$INSTALL_DIR/app.py"
 sudo install -o camwall -g camwall -m 0640 "$REPO_DIR/requirements.txt" "$INSTALL_DIR/requirements.txt"
 sudo install -o camwall -g camwall -m 0640 "$REPO_DIR/static/index.html" "$INSTALL_DIR/static/index.html"
