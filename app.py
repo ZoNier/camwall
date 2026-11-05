@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import signal
+from collections import deque
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ CONFIG_PATH = Path(os.getenv("CAMWALL_CONFIG", str(BASE_DIR / "playlist.json")))
 SETTINGS_PATH = Path(os.getenv("CAMWALL_SETTINGS", str(BASE_DIR / "settings.json")))
 WEB_DIR = BASE_DIR / "static"
 FFMPEG = os.getenv("CAMWALL_FFMPEG", "ffmpeg")
+FFPROBE = os.getenv("CAMWALL_FFPROBE", "ffprobe")
 logging.basicConfig(level=os.getenv("CAMWALL_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("camwall")
 
@@ -64,26 +66,19 @@ def load_config() -> ConfigModel:
             legacy_settings = raw.get("settings", {}) or {}
         else:
             raise ValueError("playlist.json must contain a camera list or an object with cameras")
-
-        # Migrate settings from the old combined playlist format only when no
-        # separate settings.json exists. Existing user settings always win.
         if SETTINGS_PATH.exists():
             settings_raw = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
         else:
             settings = Settings.model_validate(legacy_settings)
             _atomic_write_json(SETTINGS_PATH, settings.model_dump(), 0o600)
             settings_raw = settings.model_dump()
-
         settings = Settings.model_validate(settings_raw)
         cameras = [Camera.model_validate(item) for item in cameras_raw]
         for index, camera in enumerate(cameras, 1):
             if not camera.url.startswith(("rtsp://", "rtsps://")):
                 raise ValueError(f"Camera #{index}: URL must start with rtsp:// or rtsps://")
-
-        # Normalize old combined playlist format without losing camera entries.
         if not isinstance(raw, dict) or "settings" in raw or "cameras" not in raw:
             _atomic_write_json(CONFIG_PATH, {"cameras": [c.model_dump() for c in cameras]}, 0o600)
-
         return ConfigModel(settings=settings, cameras=cameras)
     except (OSError, json.JSONDecodeError, ValidationError, ValueError) as exc:
         raise RuntimeError(f"Cannot load CamWall configuration: {exc}") from exc
@@ -98,122 +93,177 @@ config = ConfigModel()
 config_lock = asyncio.Lock()
 
 
-class StreamHub:
-    """Starts one FFmpeg process per camera and broadcasts MPEG-TS to viewers."""
-    def __init__(self):
-        self.clients: dict[int, set[asyncio.Queue[bytes]]] = {}
-        self.tasks: dict[int, asyncio.Task] = {}
-        self.processes: dict[int, asyncio.subprocess.Process] = {}
+class CameraStream:
+    """One persistent RTSP ingest process per enabled camera; no video transcoding."""
+    def __init__(self, camera_id: int):
+        self.camera_id = camera_id
+        self.task: asyncio.Task | None = None
+        self.process: asyncio.subprocess.Process | None = None
+        self.clients: set[asyncio.Queue[bytes]] = set()
+        self.buffer: deque[bytes] = deque(maxlen=24)
+        self.state = "starting"
+        self.codec = "unknown"
+        self.width: int | None = None
+        self.height: int | None = None
+        self.last_error: str | None = None
         self.lock = asyncio.Lock()
 
-    async def subscribe(self, camera_id: int) -> asyncio.Queue[bytes]:
-        queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=8)
+    async def probe(self, url: str) -> None:
+        args = [FFPROBE, "-v", "error", "-rtsp_transport", "tcp", "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name,width,height", "-of", "json", url]
+        try:
+            proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
+            data = json.loads(stdout or b"{}")
+            streams = data.get("streams") or []
+            if streams:
+                stream = streams[0]
+                self.codec = str(stream.get("codec_name") or "unknown").lower()
+                self.width = stream.get("width")
+                self.height = stream.get("height")
+        except Exception as exc:
+            self.last_error = f"ffprobe: {type(exc).__name__}"
+            log.warning("Codec probe failed camera=%d: %s", self.camera_id, exc)
+
+    async def subscribe(self) -> asyncio.Queue[bytes]:
+        queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=48)
         async with self.lock:
-            self.clients.setdefault(camera_id, set()).add(queue)
-            task = self.tasks.get(camera_id)
-            if task is None or task.done():
-                self.tasks[camera_id] = asyncio.create_task(self.runner(camera_id))
+            self.clients.add(queue)
+            # Send recent TS data immediately; resend_headers makes MPEG-TS
+            # PAT/PMT available again at keyframes for late joiners.
+            for chunk in self.buffer:
+                if not queue.full():
+                    queue.put_nowait(chunk)
         return queue
 
-    async def unsubscribe(self, camera_id: int, queue: asyncio.Queue[bytes]) -> None:
+    async def unsubscribe(self, queue: asyncio.Queue[bytes]) -> None:
         async with self.lock:
-            viewers = self.clients.get(camera_id)
-            if viewers:
-                viewers.discard(queue)
-                if not viewers:
-                    self.clients.pop(camera_id, None)
+            self.clients.discard(queue)
 
-    async def broadcast(self, camera_id: int, data: bytes) -> None:
-        for queue in list(self.clients.get(camera_id, set())):
+    async def broadcast(self, chunk: bytes) -> None:
+        self.buffer.append(chunk)
+        for queue in tuple(self.clients):
             if queue.full():
                 with suppress(asyncio.QueueEmpty):
                     queue.get_nowait()
             with suppress(asyncio.QueueFull):
-                queue.put_nowait(data)
+                queue.put_nowait(chunk)
 
-    async def runner(self, camera_id: int) -> None:
+    async def run(self) -> None:
         while True:
-            async with self.lock:
-                if not self.clients.get(camera_id) or not 0 <= camera_id < len(config.cameras):
-                    return
-                camera = config.cameras[camera_id]
-                settings = config.settings
-                if not camera.enabled:
-                    return
-
+            camera = config.cameras[self.camera_id] if self.camera_id < len(config.cameras) else None
+            if camera is None or not camera.enabled:
+                self.state = "disabled"
+                return
+            self.state = "connecting"
+            self.last_error = None
+            await self.probe(camera.url)
             args = [FFMPEG, "-hide_banner", "-loglevel", "warning", "-nostdin",
                     "-rtsp_transport", "tcp", "-fflags", "nobuffer", "-flags", "low_delay",
-                    "-analyzeduration", "1000000", "-probesize", "1000000", "-i", camera.url,
-                    "-map", "0:v:0",
-                    "-vf", "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fps=10",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                    "-pix_fmt", "yuv420p", "-b:v", "500k", "-maxrate", "600k",
-                    "-bufsize", "300k", "-g", "20", "-keyint_min", "10"]
-            args += ["-map", "0:a:0?"] if settings.stream_audio else ["-an"]
+                    "-i", camera.url, "-map", "0:v:0", "-c:v", "copy"]
+            if config.settings.stream_audio:
+                args += ["-map", "0:a:0?", "-c:a", "copy"]
+            else:
+                args += ["-an"]
             args += ["-muxdelay", "0", "-muxpreload", "0", "-mpegts_flags", "+resend_headers",
                      "-flush_packets", "1", "-f", "mpegts", "pipe:1"]
             proc = None
             try:
                 proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
-                self.processes[camera_id] = proc
-                log.info("FFmpeg started camera=%d pid=%d", camera_id, proc.pid)
+                self.process = proc
+                self.state = "live"
+                log.info("RTSP relay started camera=%d codec=%s pid=%d", self.camera_id, self.codec, proc.pid)
+                assert proc.stdout is not None
                 while True:
-                    async with self.lock:
-                        if not self.clients.get(camera_id):
-                            break
-                    chunk = await proc.stdout.read(64 * 1024)
+                    chunk = await proc.stdout.read(188 * 348)
                     if not chunk:
                         break
-                    await self.broadcast(camera_id, chunk)
+                    await self.broadcast(chunk)
             except FileNotFoundError:
+                self.state = "error"
+                self.last_error = "FFmpeg executable not found"
                 log.exception("FFmpeg executable not found: %s", FFMPEG)
                 return
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                log.exception("Streaming failed for camera %d", camera_id)
+            except Exception as exc:
+                self.last_error = str(exc)
+                log.exception("Stream relay failed camera=%d", self.camera_id)
             finally:
-                if proc is not None:
-                    if proc.returncode is None:
-                        with suppress(ProcessLookupError):
-                            proc.send_signal(signal.SIGTERM)
-                        try:
-                            await asyncio.wait_for(proc.wait(), timeout=3)
-                        except asyncio.TimeoutError:
-                            proc.kill()
-                            await proc.wait()
-                    self.processes.pop(camera_id, None)
-            async with self.lock:
-                if not self.clients.get(camera_id):
-                    return
-            await asyncio.sleep(settings.reconnect_seconds)
+                self.process = None
+                if proc is not None and proc.returncode is None:
+                    with suppress(ProcessLookupError):
+                        proc.send_signal(signal.SIGTERM)
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=3)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+                        await proc.wait()
+            self.state = "reconnecting"
+            await asyncio.sleep(config.settings.reconnect_seconds)
 
-    async def stop_all(self) -> None:
-        for task in list(self.tasks.values()):
+    def status(self) -> dict[str, Any]:
+        return {"id": self.camera_id, "state": self.state, "codec": self.codec,
+                "width": self.width, "height": self.height, "viewers": len(self.clients),
+                "error": self.last_error}
+
+
+class StreamManager:
+    def __init__(self):
+        self.streams: dict[int, CameraStream] = {}
+
+    async def start(self) -> None:
+        for camera_id, camera in enumerate(config.cameras):
+            if camera.enabled:
+                stream = CameraStream(camera_id)
+                self.streams[camera_id] = stream
+                stream.task = asyncio.create_task(stream.run(), name=f"camwall-camera-{camera_id}")
+
+    async def restart(self) -> None:
+        await self.stop()
+        await self.start()
+
+    async def stop(self) -> None:
+        tasks = [s.task for s in self.streams.values() if s.task]
+        for task in tasks:
             task.cancel()
-        for task in list(self.tasks.values()):
+        for task in tasks:
             with suppress(asyncio.CancelledError):
                 await task
-        for proc in list(self.processes.values()):
-            if proc.returncode is None:
-                proc.terminate()
-                with suppress(Exception):
-                    await asyncio.wait_for(proc.wait(), timeout=3)
+        self.streams.clear()
+
+    async def subscribe(self, camera_id: int) -> asyncio.Queue[bytes]:
+        stream = self.streams.get(camera_id)
+        if stream is None:
+            raise KeyError(camera_id)
+        return await stream.subscribe()
+
+    async def unsubscribe(self, camera_id: int, queue: asyncio.Queue[bytes]) -> None:
+        stream = self.streams.get(camera_id)
+        if stream:
+            await stream.unsubscribe(queue)
+
+    def statuses(self) -> list[dict[str, Any]]:
+        return [self.streams[i].status() if i in self.streams else
+                {"id": i, "state": "disabled", "codec": None, "viewers": 0, "error": None}
+                for i in range(len(config.cameras))]
 
 
-hub = StreamHub()
+manager = StreamManager()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global config
     config = load_config()
+    await manager.start()
     yield
-    await hub.stop_all()
+    await manager.stop()
 
 
-app = FastAPI(title="CamWall", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="CamWall", version="2.0.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
@@ -224,15 +274,20 @@ async def index():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "cameras": len(config.cameras), "ffmpeg": FFMPEG}
+    return {"status": "ok", "cameras": len(config.cameras), "ffmpeg": FFMPEG,
+            "ingest": manager.statuses()}
 
 
 @app.get("/api/config")
 async def get_config():
-    # This endpoint includes RTSP credentials for the settings editor. Do not expose
-    # this app to untrusted networks; authentication is not implemented yet.
+    # Includes RTSP credentials for the settings editor. Restrict this app to trusted networks.
     async with config_lock:
         return config.model_dump()
+
+
+@app.get("/api/streams")
+async def get_streams():
+    return manager.statuses()
 
 
 @app.put("/api/config")
@@ -248,21 +303,25 @@ async def put_config(payload: dict[str, Any]):
     async with config_lock:
         save_config(candidate)
         config = candidate
+        await manager.restart()
     return {"ok": True, "cameras": len(config.cameras)}
 
 
 @app.websocket("/ws/stream/{camera_id}")
 async def stream(websocket: WebSocket, camera_id: int):
     await websocket.accept()
-    async with config_lock:
-        if camera_id < 0 or camera_id >= len(config.cameras) or not config.cameras[camera_id].enabled:
-            await websocket.close(code=1008, reason="Unknown or disabled camera")
-            return
-    queue = await hub.subscribe(camera_id)
+    if camera_id < 0 or camera_id >= len(config.cameras) or not config.cameras[camera_id].enabled:
+        await websocket.close(code=1008, reason="Unknown or disabled camera")
+        return
+    try:
+        queue = await manager.subscribe(camera_id)
+    except KeyError:
+        await websocket.close(code=1011, reason="Camera stream is not available")
+        return
     try:
         while True:
             await websocket.send_bytes(await queue.get())
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
-        await hub.unsubscribe(camera_id, queue)
+        await manager.unsubscribe(camera_id, queue)
