@@ -76,22 +76,22 @@ def load_config() -> ConfigModel:
         if SETTINGS_PATH.exists():
             settings_raw = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
         else:
-            settings = Settings.model_validate(legacy_settings)
-            _atomic_write_json(SETTINGS_PATH, settings.model_dump(), 0o600)
-            settings_raw = settings.model_dump()
+            settings_raw = legacy_settings
+        legacy_autoplay = bool(settings_raw.get("autoplay", False))
+        legacy_audio = bool(settings_raw.get("stream_audio", False))
         migrated_cameras = []
         for item in cameras_raw:
             item = dict(item)
-            item.setdefault("autoplay", bool(settings_raw.get("autoplay", False)))
-            item.setdefault("audio", bool(settings_raw.get("stream_audio", False)))
+            item.setdefault("autoplay", legacy_autoplay)
+            item.setdefault("audio", legacy_audio)
             migrated_cameras.append(item)
         settings = Settings.model_validate(settings_raw)
         cameras = [Camera.model_validate(item) for item in migrated_cameras]
         for index, camera in enumerate(cameras, 1):
             if not camera.url.startswith(("rtsp://", "rtsps://")):
                 raise ValueError(f"Camera #{index}: URL must start with rtsp:// or rtsps://")
-        if not isinstance(raw, dict) or "settings" in raw or "cameras" not in raw:
-            _atomic_write_json(CONFIG_PATH, {"cameras": [c.model_dump() for c in cameras]}, 0o600)
+        _atomic_write_json(CONFIG_PATH, {"cameras": [c.model_dump() for c in cameras]}, 0o600)
+        _atomic_write_json(SETTINGS_PATH, settings.model_dump(), 0o600)
         return ConfigModel(settings=settings, cameras=cameras)
     except (OSError, json.JSONDecodeError, ValidationError, ValueError) as exc:
         raise RuntimeError(f"Cannot load CamWall configuration: {exc}") from exc
@@ -508,7 +508,10 @@ async def stream(websocket: WebSocket, camera_id: int):
         await websocket.close(code=1008, reason="Invalid origin")
         return
     session = websocket.scope.get("session", {})
-    if not session.get("username"):
+    issued_at = session.get("issued_at")
+    max_age = 30 * 24 * 60 * 60 if session.get("remember") else 12 * 60 * 60
+    if (not session.get("username") or not isinstance(issued_at, (int, float))
+            or time.time() - issued_at > max_age):
         await websocket.close(code=1008, reason="Authentication required")
         return
     await websocket.accept()
