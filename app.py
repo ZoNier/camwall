@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import signal
+import time
 from collections import deque
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -78,8 +79,14 @@ def load_config() -> ConfigModel:
             settings = Settings.model_validate(legacy_settings)
             _atomic_write_json(SETTINGS_PATH, settings.model_dump(), 0o600)
             settings_raw = settings.model_dump()
+        migrated_cameras = []
+        for item in cameras_raw:
+            item = dict(item)
+            item.setdefault("autoplay", bool(settings_raw.get("autoplay", False)))
+            item.setdefault("audio", bool(settings_raw.get("stream_audio", False)))
+            migrated_cameras.append(item)
         settings = Settings.model_validate(settings_raw)
-        cameras = [Camera.model_validate(item) for item in cameras_raw]
+        cameras = [Camera.model_validate(item) for item in migrated_cameras]
         for index, camera in enumerate(cameras, 1):
             if not camera.url.startswith(("rtsp://", "rtsps://")):
                 raise ValueError(f"Camera #{index}: URL must start with rtsp:// or rtsps://")
@@ -318,7 +325,7 @@ app = FastAPI(title="CamWall", version="2.1.0", lifespan=lifespan, docs_url=None
 if not SESSION_SECRET:
     raise RuntimeError("CAMWALL_SESSION_SECRET is not configured")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, session_cookie="camwall_session",
-                   max_age=60 * 60 * 12, same_site="strict",
+                   max_age=30 * 24 * 60 * 60, same_site="strict",
                    https_only=os.getenv("CAMWALL_COOKIE_SECURE", "0") == "1")
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
@@ -345,7 +352,11 @@ def require_same_origin(request: Request) -> None:
 
 def require_login(request: Request) -> str:
     username = request.session.get("username")
-    if not username:
+    issued_at = request.session.get("issued_at")
+    remember = bool(request.session.get("remember", False))
+    max_age = 30 * 24 * 60 * 60 if remember else 12 * 60 * 60
+    if not username or not isinstance(issued_at, (int, float)) or time.time() - issued_at > max_age:
+        request.session.clear()
         raise HTTPException(status_code=401, detail="Authentication required")
     return str(username)
 
@@ -353,6 +364,7 @@ def require_login(request: Request) -> str:
 class LoginPayload(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=256)
+    remember: bool = False
 
 
 class FavoritePayload(BaseModel):
@@ -381,13 +393,18 @@ async def login(payload: LoginPayload, request: Request):
     LOGIN_ATTEMPTS.pop(ip, None)
     request.session.clear()
     request.session["username"] = record["username"]
+    request.session["issued_at"] = time.time()
+    request.session["remember"] = payload.remember
     return {"ok": True, "username": record["username"]}
 
 
 @app.get("/api/auth/me")
 async def auth_me(request: Request):
-    username = request.session.get("username")
-    return {"authenticated": bool(username), "username": username}
+    try:
+        username = require_login(request)
+        return {"authenticated": True, "username": username}
+    except HTTPException:
+        return {"authenticated": False, "username": None}
 
 
 @app.post("/api/auth/logout")
