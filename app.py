@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
@@ -100,7 +100,7 @@ class CameraStream:
         self.task: asyncio.Task | None = None
         self.process: asyncio.subprocess.Process | None = None
         self.clients: set[asyncio.Queue[bytes]] = set()
-        self.buffer: deque[bytes] = deque(maxlen=24)
+        self.buffer: deque[bytes] = deque(maxlen=64)\n        self.preview: bytes | None = None\n        self.preview_task: asyncio.Task | None = None
         self.state = "starting"
         self.codec = "unknown"
         self.width: int | None = None
