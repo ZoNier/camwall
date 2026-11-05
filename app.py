@@ -352,6 +352,10 @@ class LoginPayload(BaseModel):
     password: str = Field(min_length=1, max_length=256)
 
 
+class FavoritePayload(BaseModel):
+    favorite: bool
+
+
 class PasswordPayload(BaseModel):
     current_password: str = Field(min_length=1, max_length=256)
     new_password: str = Field(min_length=12, max_length=256)
@@ -437,6 +441,18 @@ async def get_preview(camera_id: int, request: Request):
         raise HTTPException(status_code=404, detail="Preview is not ready")
     return Response(content=stream.preview, media_type="image/jpeg",
                     headers={"Cache-Control": "no-store, max-age=0"})
+
+
+@app.patch("/api/cameras/{camera_id}/favorite")
+async def set_favorite(camera_id: int, payload: FavoritePayload, request: Request):
+    require_same_origin(request)
+    require_login(request)
+    async with config_lock:
+        if camera_id < 0 or camera_id >= len(config.cameras):
+            raise HTTPException(status_code=404, detail="Camera not found")
+        config.cameras[camera_id].favorite = payload.favorite
+        save_config(config)
+    return {"ok": True, "favorite": payload.favorite}
 
 
 @app.put("/api/config")
