@@ -153,7 +153,7 @@ class CameraStream:
     async def preview_loop(self) -> None:
         """Decode one cached frame periodically from the existing MPEG-TS buffer."""
         while True:
-            await asyncio.sleep(10)
+            await asyncio.sleep(10 + (self.camera_id % 5) * 2)
             if not self.buffer:
                 continue
             payload = b"".join(self.buffer)
