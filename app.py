@@ -480,6 +480,13 @@ async def put_config(payload: dict[str, Any], request: Request):
 
 @app.websocket("/ws/stream/{camera_id}")
 async def stream(websocket: WebSocket, camera_id: int):
+    origin = websocket.headers.get("origin", "")
+    host = websocket.headers.get("host", "")
+    from urllib.parse import urlsplit
+    parsed_origin = urlsplit(origin)
+    if not origin or parsed_origin.netloc != host or parsed_origin.scheme not in ("http", "https"):
+        await websocket.close(code=1008, reason="Invalid origin")
+        return
     session = websocket.scope.get("session", {})
     if not session.get("username"):
         await websocket.close(code=1008, reason="Authentication required")
