@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
@@ -150,6 +150,38 @@ class CameraStream:
             with suppress(asyncio.QueueFull):
                 queue.put_nowait(chunk)
 
+    async def preview_loop(self) -> None:
+        """Decode one cached frame periodically from the existing MPEG-TS buffer."""
+        while True:
+            await asyncio.sleep(10)
+            if not self.buffer:
+                continue
+            payload = b"".join(self.buffer)
+            if not payload:
+                continue
+            args = [FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "mpegts", "-i", "pipe:0",
+                    "-an", "-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "6",
+                    "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
+            proc = None
+            try:
+                proc = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                stdout, _ = await asyncio.wait_for(proc.communicate(payload), timeout=5)
+                if stdout.startswith(bytes((255, 216))):
+                    self.preview = stdout
+            except asyncio.CancelledError:
+                if proc and proc.returncode is None:
+                    proc.kill()
+                    with suppress(Exception):
+                        await proc.wait()
+                raise
+            except Exception as exc:
+                log.debug("Preview decode skipped camera=%d: %s", self.camera_id, exc)
+                if proc and proc.returncode is None:
+                    proc.kill()
+                    with suppress(Exception):
+                        await proc.wait()
+
     async def run(self) -> None:
         while True:
             camera = config.cameras[self.camera_id] if self.camera_id < len(config.cameras) else None
@@ -174,6 +206,8 @@ class CameraStream:
                     stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
                 self.process = proc
                 self.state = "live"
+                if self.preview_task is None or self.preview_task.done():
+                    self.preview_task = asyncio.create_task(self.preview_loop(), name=f"camwall-preview-{self.camera_id}")
                 log.info("RTSP relay started camera=%d codec=%s pid=%d", self.camera_id, self.codec, proc.pid)
                 assert proc.stdout is not None
                 while True:
@@ -204,6 +238,13 @@ class CameraStream:
             self.state = "reconnecting"
             await asyncio.sleep(config.settings.reconnect_seconds)
 
+    async def stop_preview(self) -> None:
+        if self.preview_task:
+            self.preview_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.preview_task
+            self.preview_task = None
+
     def status(self) -> dict[str, Any]:
         return {"id": self.camera_id, "state": self.state, "codec": self.codec,
                 "width": self.width, "height": self.height, "viewers": len(self.clients),
@@ -232,6 +273,8 @@ class StreamManager:
         for task in tasks:
             with suppress(asyncio.CancelledError):
                 await task
+        for stream in self.streams.values():
+            await stream.stop_preview()
         self.streams.clear()
 
     async def subscribe(self, camera_id: int) -> asyncio.Queue[bytes]:
@@ -288,6 +331,15 @@ async def get_config():
 @app.get("/api/streams")
 async def get_streams():
     return manager.statuses()
+
+
+@app.get("/api/preview/{camera_id}")
+async def get_preview(camera_id: int):
+    stream = manager.streams.get(camera_id)
+    if stream is None or stream.preview is None:
+        raise HTTPException(status_code=404, detail="Preview is not ready")
+    return Response(content=stream.preview, media_type="image/jpeg",
+                    headers={"Cache-Control": "no-store, max-age=0"})
 
 
 @app.put("/api/config")
