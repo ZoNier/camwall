@@ -335,8 +335,11 @@ def auth_record() -> dict[str, str]:
 
 
 def require_same_origin(request: Request) -> None:
-    origin = request.headers.get("origin")
-    if not origin or origin.rstrip("/") != str(request.base_url).rstrip("/"):
+    from urllib.parse import urlsplit
+    origin = request.headers.get("origin", "")
+    parsed = urlsplit(origin)
+    host = request.headers.get("host", "")
+    if not origin or parsed.netloc != host or parsed.scheme not in ("http", "https"):
         raise HTTPException(status_code=403, detail="Invalid request origin")
 
 
