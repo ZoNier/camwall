@@ -113,7 +113,7 @@ class CameraStream:
         self.task: asyncio.Task | None = None
         self.process: asyncio.subprocess.Process | None = None
         self.clients: set[asyncio.Queue[bytes]] = set()
-        self.buffer: deque[bytes] = deque(maxlen=64)
+        self.buffer: deque[bytes] = deque(maxlen=128)
         self.preview: bytes | None = None
         self.preview_task: asyncio.Task | None = None
         self.state = "starting"
@@ -172,10 +172,19 @@ class CameraStream:
             if not self.buffer:
                 continue
             payload = b"".join(self.buffer)
-            if not payload:
+            if len(payload) < 188 * 10:
                 continue
-            args = [FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "mpegts", "-i", "pipe:0",
-                    "-an", "-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "6",
+            # Pipe reads may begin in the middle of a 188-byte MPEG-TS packet.
+            sync = next((offset for offset in range(min(188, len(payload) - 376))
+                         if payload[offset] == 0x47 and payload[offset + 188] == 0x47
+                         and payload[offset + 376] == 0x47), None)
+            if sync is None:
+                continue
+            payload = payload[sync:]
+            args = [FFMPEG, "-hide_banner", "-loglevel", "error", "-fflags", "+discardcorrupt+genpts",
+                    "-analyzeduration", "10M", "-probesize", "10M", "-skip_frame", "nokey",
+                    "-f", "mpegts", "-i", "pipe:0", "-an", "-frames:v", "1",
+                    "-vf", "scale=480:-2", "-q:v", "6",
                     "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
             proc = None
             try:
