@@ -70,6 +70,11 @@ if [[ ! -f /etc/camwall/camwall.env ]] || ! grep -q '^CAMWALL_SESSION_SECRET=' /
   printf 'CAMWALL_SESSION_SECRET=%s\nCAMWALL_COOKIE_SECURE=0\n' "$SESSION_SECRET" > /etc/camwall/camwall.env
   chmod 0600 /etc/camwall/camwall.env
 fi
+chmod 0600 /etc/camwall/camwall.env
+if [[ -f "$INSTALL_DIR/auth.json" ]]; then
+  chown camwall:camwall "$INSTALL_DIR/auth.json"
+  chmod 0600 "$INSTALL_DIR/auth.json"
+fi
 
 install -o root -g root -m 0644 "$APP_DIR/systemd/camwall.service" "/etc/systemd/system/$SERVICE.service"
 systemctl daemon-reload
