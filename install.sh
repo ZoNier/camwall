@@ -20,7 +20,7 @@ done
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates ffmpeg git python3 python3-pip python3-venv
+apt-get install -y ca-certificates ffmpeg git openssl python3 python3-pip python3-venv
 
 if ! id "$APP_USER" >/dev/null 2>&1; then
   useradd --system --home-dir "$INSTALL_DIR" --shell /usr/sbin/nologin "$APP_USER"
@@ -46,6 +46,30 @@ install -o root -g root -m 0750 "$APP_DIR/uninstall.sh" "$INSTALL_DIR/uninstall.
 python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/pip" install --upgrade pip
 "$INSTALL_DIR/venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+
+# Create the first administrator credentials only once. Existing credentials survive updates.
+install -d -o root -g root -m 0700 /etc/camwall
+if [[ ! -f "$INSTALL_DIR/auth.json" ]]; then
+  INITIAL_PASSWORD="$(openssl rand -hex 18)"
+  CAMWALL_AUTH_OUT="$INSTALL_DIR/auth.json" CAMWALL_INITIAL_PASSWORD="$INITIAL_PASSWORD" "$INSTALL_DIR/venv/bin/python" - <<'PY'
+import json, os
+from pwdlib import PasswordHash
+path = os.environ["CAMWALL_AUTH_OUT"]
+data = {"username": "admin", "password_hash": PasswordHash.recommended().hash(os.environ["CAMWALL_INITIAL_PASSWORD"])}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f)
+    f.write("\\n")
+os.chmod(path, 0o600)
+PY
+  chown camwall:camwall "$INSTALL_DIR/auth.json"
+  echo "CAMWALL_INITIAL_PASSWORD=$INITIAL_PASSWORD"
+  echo "Збережи цей пароль адміністратора — він показується лише один раз."
+fi
+if [[ ! -f /etc/camwall/camwall.env ]] || ! grep -q '^CAMWALL_SESSION_SECRET=' /etc/camwall/camwall.env; then
+  SESSION_SECRET="$(openssl rand -hex 32)"
+  printf 'CAMWALL_SESSION_SECRET=%s\\nCAMWALL_COOKIE_SECURE=0\\n' "$SESSION_SECRET" > /etc/camwall/camwall.env
+  chmod 0600 /etc/camwall/camwall.env
+fi
 
 install -o root -g root -m 0644 "$APP_DIR/systemd/camwall.service" "/etc/systemd/system/$SERVICE.service"
 systemctl daemon-reload
