@@ -10,7 +10,9 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from starlette.middleware.sessions import SessionMiddleware
+from pwdlib import PasswordHash
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
@@ -21,6 +23,10 @@ SETTINGS_PATH = Path(os.getenv("CAMWALL_SETTINGS", str(BASE_DIR / "settings.json
 WEB_DIR = BASE_DIR / "static"
 FFMPEG = os.getenv("CAMWALL_FFMPEG", "ffmpeg")
 FFPROBE = os.getenv("CAMWALL_FFPROBE", "ffprobe")
+AUTH_PATH = Path(os.getenv("CAMWALL_AUTH_FILE", str(BASE_DIR / "auth.json")))
+SESSION_SECRET = os.getenv("CAMWALL_SESSION_SECRET", "")
+PASSWORD_HASHER = PasswordHash.recommended()
+LOGIN_ATTEMPTS: dict[str, tuple[int, float]] = {}
 logging.basicConfig(level=os.getenv("CAMWALL_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("camwall")
 
@@ -308,8 +314,94 @@ async def lifespan(app: FastAPI):
     await manager.stop()
 
 
-app = FastAPI(title="CamWall", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="CamWall", version="2.1.0", lifespan=lifespan)
+if not SESSION_SECRET:
+    raise RuntimeError("CAMWALL_SESSION_SECRET is not configured")
+app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, session_cookie="camwall_session",
+                   max_age=60 * 60 * 12, same_site="strict",
+                   https_only=os.getenv("CAMWALL_COOKIE_SECURE", "0") == "1")
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+
+
+def auth_record() -> dict[str, str]:
+    try:
+        data = json.loads(AUTH_PATH.read_text(encoding="utf-8"))
+        if not isinstance(data.get("username"), str) or not isinstance(data.get("password_hash"), str):
+            raise ValueError("invalid auth file")
+        return data
+    except Exception as exc:
+        log.exception("Cannot read auth configuration")
+        raise HTTPException(status_code=503, detail="Authentication is not configured") from exc
+
+
+def require_same_origin(request: Request) -> None:
+    origin = request.headers.get("origin")
+    if not origin or origin.rstrip("/") != str(request.base_url).rstrip("/"):
+        raise HTTPException(status_code=403, detail="Invalid request origin")
+
+
+def require_login(request: Request) -> str:
+    username = request.session.get("username")
+    if not username:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return str(username)
+
+
+class LoginPayload(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class PasswordPayload(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
+
+
+@app.post("/api/auth/login")
+async def login(payload: LoginPayload, request: Request):
+    require_same_origin(request)
+    now = asyncio.get_running_loop().time()
+    ip = request.client.host if request.client else "unknown"
+    attempts, blocked_until = LOGIN_ATTEMPTS.get(ip, (0, 0.0))
+    if now < blocked_until:
+        raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
+    record = auth_record()
+    valid = payload.username == record["username"] and PASSWORD_HASHER.verify(payload.password, record["password_hash"])
+    if not valid:
+        attempts += 1
+        LOGIN_ATTEMPTS[ip] = (attempts, now + 300 if attempts >= 5 else 0.0)
+        raise HTTPException(status_code=401, detail="Невірний логін або пароль")
+    LOGIN_ATTEMPTS.pop(ip, None)
+    request.session.clear()
+    request.session["username"] = record["username"]
+    return {"ok": True, "username": record["username"]}
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    username = request.session.get("username")
+    return {"authenticated": bool(username), "username": username}
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request):
+    require_same_origin(request)
+    require_login(request)
+    request.session.clear()
+    return {"ok": True}
+
+
+@app.post("/api/auth/password")
+async def change_password(payload: PasswordPayload, request: Request):
+    require_same_origin(request)
+    username = require_login(request)
+    record = auth_record()
+    if username != record["username"] or not PASSWORD_HASHER.verify(payload.current_password, record["password_hash"]):
+        raise HTTPException(status_code=403, detail="Поточний пароль неправильний")
+    record["password_hash"] = PASSWORD_HASHER.hash(payload.new_password)
+    _atomic_write_json(AUTH_PATH, record, 0o600)
+    request.session.clear()
+    return {"ok": True}
 
 
 @app.get("/")
@@ -324,19 +416,22 @@ async def health():
 
 
 @app.get("/api/config")
-async def get_config():
+async def get_config(request: Request):
+    require_login(request)
     # Includes RTSP credentials for the settings editor. Restrict this app to trusted networks.
     async with config_lock:
         return config.model_dump()
 
 
 @app.get("/api/streams")
-async def get_streams():
+async def get_streams(request: Request):
+    require_login(request)
     return manager.statuses()
 
 
 @app.get("/api/preview/{camera_id}")
-async def get_preview(camera_id: int):
+async def get_preview(camera_id: int, request: Request):
+    require_login(request)
     stream = manager.streams.get(camera_id)
     if stream is None or stream.preview is None:
         raise HTTPException(status_code=404, detail="Preview is not ready")
@@ -345,8 +440,10 @@ async def get_preview(camera_id: int):
 
 
 @app.put("/api/config")
-async def put_config(payload: dict[str, Any]):
+async def put_config(payload: dict[str, Any], request: Request):
     global config
+    require_same_origin(request)
+    require_login(request)
     try:
         candidate = ConfigModel.model_validate(payload)
         for index, camera in enumerate(candidate.cameras, 1):
@@ -355,14 +452,22 @@ async def put_config(payload: dict[str, Any]):
     except (ValidationError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     async with config_lock:
+        previous = config
         save_config(candidate)
         config = candidate
-        await manager.restart()
+        old_stream_signature = [(c.url, c.enabled) for c in previous.cameras]
+        new_stream_signature = [(c.url, c.enabled) for c in candidate.cameras]
+        if old_stream_signature != new_stream_signature or previous.settings.stream_audio != candidate.settings.stream_audio:
+            await manager.restart()
     return {"ok": True, "cameras": len(config.cameras)}
 
 
 @app.websocket("/ws/stream/{camera_id}")
 async def stream(websocket: WebSocket, camera_id: int):
+    session = websocket.scope.get("session", {})
+    if not session.get("username"):
+        await websocket.close(code=1008, reason="Authentication required")
+        return
     await websocket.accept()
     if camera_id < 0 or camera_id >= len(config.cameras) or not config.cameras[camera_id].enabled:
         await websocket.close(code=1008, reason="Unknown or disabled camera")
