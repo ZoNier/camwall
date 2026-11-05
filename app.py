@@ -37,15 +37,15 @@ class Camera(BaseModel):
     favorite: bool = False
     country_name: str | None = None
     enabled: bool = True
+    autoplay: bool = False
+    audio: bool = False
 
 
 class Settings(BaseModel):
     grid_columns: int = Field(default=4, ge=1, le=6)
     theme: str = "dark"
-    autoplay: bool = True
     low_latency: bool = True
     reconnect_seconds: int = Field(default=3, ge=1, le=30)
-    stream_audio: bool = False
 
 
 class ConfigModel(BaseModel):
@@ -202,7 +202,7 @@ class CameraStream:
             args = [FFMPEG, "-hide_banner", "-loglevel", "warning", "-nostdin",
                     "-rtsp_transport", "tcp", "-fflags", "nobuffer", "-flags", "low_delay",
                     "-i", camera.url, "-map", "0:v:0", "-c:v", "copy"]
-            if config.settings.stream_audio:
+            if camera.audio:
                 args += ["-map", "0:a:0?", "-c:a", "copy"]
             else:
                 args += ["-an"]
@@ -361,7 +361,7 @@ class FavoritePayload(BaseModel):
 
 class PasswordPayload(BaseModel):
     current_password: str = Field(min_length=1, max_length=256)
-    new_password: str = Field(min_length=12, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
 
 
 @app.post("/api/auth/login")
@@ -474,9 +474,9 @@ async def put_config(payload: dict[str, Any], request: Request):
         previous = config
         save_config(candidate)
         config = candidate
-        old_stream_signature = [(c.url, c.enabled) for c in previous.cameras]
-        new_stream_signature = [(c.url, c.enabled) for c in candidate.cameras]
-        if old_stream_signature != new_stream_signature or previous.settings.stream_audio != candidate.settings.stream_audio:
+        old_stream_signature = [(c.url, c.enabled, c.audio) for c in previous.cameras]
+        new_stream_signature = [(c.url, c.enabled, c.audio) for c in candidate.cameras]
+        if old_stream_signature != new_stream_signature:
             await manager.restart()
     return {"ok": True, "cameras": len(config.cameras)}
 
