@@ -100,7 +100,9 @@ class CameraStream:
         self.task: asyncio.Task | None = None
         self.process: asyncio.subprocess.Process | None = None
         self.clients: set[asyncio.Queue[bytes]] = set()
-        self.buffer: deque[bytes] = deque(maxlen=64)\n        self.preview: bytes | None = None\n        self.preview_task: asyncio.Task | None = None
+        self.buffer: deque[bytes] = deque(maxlen=64)
+        self.preview: bytes | None = None
+        self.preview_task: asyncio.Task | None = None
         self.state = "starting"
         self.codec = "unknown"
         self.width: int | None = None
