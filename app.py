@@ -314,7 +314,7 @@ async def lifespan(app: FastAPI):
     await manager.stop()
 
 
-app = FastAPI(title="CamWall", version="2.1.0", lifespan=lifespan)
+app = FastAPI(title="CamWall", version="2.1.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 if not SESSION_SECRET:
     raise RuntimeError("CAMWALL_SESSION_SECRET is not configured")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, session_cookie="camwall_session",
