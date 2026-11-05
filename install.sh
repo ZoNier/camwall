@@ -58,7 +58,7 @@ path = os.environ["CAMWALL_AUTH_OUT"]
 data = {"username": "admin", "password_hash": PasswordHash.recommended().hash(os.environ["CAMWALL_INITIAL_PASSWORD"])}
 with open(path, "w", encoding="utf-8") as f:
     json.dump(data, f)
-    f.write("\\n")
+    f.write("\n")
 os.chmod(path, 0o600)
 PY
   chown camwall:camwall "$INSTALL_DIR/auth.json"
@@ -67,7 +67,7 @@ PY
 fi
 if [[ ! -f /etc/camwall/camwall.env ]] || ! grep -q '^CAMWALL_SESSION_SECRET=' /etc/camwall/camwall.env; then
   SESSION_SECRET="$(openssl rand -hex 32)"
-  printf 'CAMWALL_SESSION_SECRET=%s\\nCAMWALL_COOKIE_SECURE=0\\n' "$SESSION_SECRET" > /etc/camwall/camwall.env
+  printf 'CAMWALL_SESSION_SECRET=%s\nCAMWALL_COOKIE_SECURE=0\n' "$SESSION_SECRET" > /etc/camwall/camwall.env
   chmod 0600 /etc/camwall/camwall.env
 fi
 
