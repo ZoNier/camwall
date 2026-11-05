@@ -290,6 +290,27 @@ class StreamManager:
         await self.stop()
         await self.start()
 
+    async def apply_config(self, previous: ConfigModel, candidate: ConfigModel) -> None:
+        count = max(len(previous.cameras), len(candidate.cameras))
+        for camera_id in range(count):
+            old = previous.cameras[camera_id] if camera_id < len(previous.cameras) else None
+            new = candidate.cameras[camera_id] if camera_id < len(candidate.cameras) else None
+            old_signature = (old.url, old.enabled, old.audio) if old else None
+            new_signature = (new.url, new.enabled, new.audio) if new else None
+            if old_signature == new_signature:
+                continue
+            stream = self.streams.pop(camera_id, None)
+            if stream:
+                if stream.task:
+                    stream.task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await stream.task
+                await stream.stop_preview()
+            if new and new.enabled:
+                stream = CameraStream(camera_id)
+                self.streams[camera_id] = stream
+                stream.task = asyncio.create_task(stream.run(), name=f"camwall-camera-{camera_id}")
+
     async def stop(self) -> None:
         tasks = [s.task for s in self.streams.values() if s.task]
         for task in tasks:
@@ -500,10 +521,7 @@ async def put_config(payload: dict[str, Any], request: Request):
         previous = config
         save_config(candidate)
         config = candidate
-        old_stream_signature = [(c.url, c.enabled, c.audio) for c in previous.cameras]
-        new_stream_signature = [(c.url, c.enabled, c.audio) for c in candidate.cameras]
-        if old_stream_signature != new_stream_signature:
-            await manager.restart()
+        await manager.apply_config(previous, candidate)
     return {"ok": True, "cameras": len(config.cameras)}
 
 
