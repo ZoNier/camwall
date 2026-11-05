@@ -80,6 +80,30 @@ install -o root -g root -m 0644 "$SOURCE/systemd/camwall.service" "/etc/systemd/
 echo "Оновлюю залежності Python..."
 "$INSTALL_DIR/venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
 
+# Create the first administrator credentials only once. Existing credentials survive updates.
+install -d -o root -g root -m 0700 /etc/camwall
+if [[ ! -f "$INSTALL_DIR/auth.json" ]]; then
+  INITIAL_PASSWORD="$(openssl rand -hex 18)"
+  CAMWALL_AUTH_OUT="$INSTALL_DIR/auth.json" CAMWALL_INITIAL_PASSWORD="$INITIAL_PASSWORD" "$INSTALL_DIR/venv/bin/python" - <<'PY'
+import json, os
+from pwdlib import PasswordHash
+path = os.environ["CAMWALL_AUTH_OUT"]
+data = {"username": "admin", "password_hash": PasswordHash.recommended().hash(os.environ["CAMWALL_INITIAL_PASSWORD"])}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f)
+    f.write("\\n")
+os.chmod(path, 0o600)
+PY
+  chown camwall:camwall "$INSTALL_DIR/auth.json"
+  echo "CAMWALL_INITIAL_PASSWORD=$INITIAL_PASSWORD"
+  echo "Збережи цей пароль адміністратора — він показується лише один раз."
+fi
+if [[ ! -f /etc/camwall/camwall.env ]] || ! grep -q '^CAMWALL_SESSION_SECRET=' /etc/camwall/camwall.env; then
+  SESSION_SECRET="$(openssl rand -hex 32)"
+  printf 'CAMWALL_SESSION_SECRET=%s\\nCAMWALL_COOKIE_SECURE=0\\n' "$SESSION_SECRET" > /etc/camwall/camwall.env
+  chmod 0600 /etc/camwall/camwall.env
+fi
+
 systemctl daemon-reload
 echo "Перезапускаю сервіс..."
 systemctl restart "$SERVICE"
