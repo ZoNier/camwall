@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import shutil
 import signal
 import time
 from collections import deque
@@ -11,7 +13,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request
 from starlette.middleware.sessions import SessionMiddleware
 from pwdlib import PasswordHash
 from fastapi.responses import FileResponse, Response
@@ -25,6 +27,7 @@ WEB_DIR = BASE_DIR / "static"
 FFMPEG = os.getenv("CAMWALL_FFMPEG", "ffmpeg")
 FFPROBE = os.getenv("CAMWALL_FFPROBE", "ffprobe")
 AUTH_PATH = Path(os.getenv("CAMWALL_AUTH_FILE", str(BASE_DIR / "auth.json")))
+HLS_DIR = Path(os.getenv("CAMWALL_HLS_DIR", str(BASE_DIR / "hls")))
 SESSION_SECRET = os.getenv("CAMWALL_SESSION_SECRET", "")
 PASSWORD_HASHER = PasswordHash.recommended()
 LOGIN_ATTEMPTS: dict[str, tuple[int, float]] = {}
@@ -107,22 +110,20 @@ config_lock = asyncio.Lock()
 
 
 class CameraStream:
-    """One persistent RTSP ingest process per enabled camera; no video transcoding."""
+    """One persistent RTSP-to-HLS FFmpeg process per enabled camera; no transcoding."""
     def __init__(self, camera_id: int):
         self.camera_id = camera_id
         self.task: asyncio.Task | None = None
-        self.process: asyncio.subprocess.Process | None = None
-        self.clients: set[asyncio.Queue[bytes | None]] = set()
-        self.buffer: deque[bytes] = deque(maxlen=128)
-        self.preview: bytes | None = None
         self.preview_task: asyncio.Task | None = None
+        self.process: asyncio.subprocess.Process | None = None
+        self.hls_dir = HLS_DIR / str(camera_id)
+        self.preview: bytes | None = None
         self.state = "starting"
         self.codec = "unknown"
         self.width: int | None = None
         self.height: int | None = None
         self.last_error: str | None = None
         self.last_data_at: float | None = None
-        self.lock = asyncio.Lock()
 
     async def probe(self, url: str) -> None:
         args = [FFPROBE, "-v", "error", "-rtsp_transport", "tcp", "-select_streams", "v:0",
@@ -142,79 +143,31 @@ class CameraStream:
             self.last_error = f"ffprobe: {type(exc).__name__}"
             log.warning("Codec probe failed camera=%d: %s", self.camera_id, exc)
 
-    async def subscribe(self) -> asyncio.Queue[bytes | None]:
-        queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=48)
-        async with self.lock:
-            self.clients.add(queue)
-            # Send recent TS data immediately; resend_headers makes MPEG-TS
-            # PAT/PMT available again at keyframes for late joiners.
-            for chunk in self.buffer:
-                if not queue.full():
-                    queue.put_nowait(chunk)
-        return queue
-
-    async def unsubscribe(self, queue: asyncio.Queue[bytes | None]) -> None:
-        async with self.lock:
-            self.clients.discard(queue)
-
-    async def broadcast(self, chunk: bytes) -> None:
-        self.buffer.append(chunk)
-        for queue in tuple(self.clients):
-            if queue.full():
-                # Never drop arbitrary MPEG-TS chunks: that breaks continuity.
-                # Disconnect the slow viewer instead of feeding it corrupted TS.
-                self.clients.discard(queue)
-                while not queue.empty():
-                    with suppress(asyncio.QueueEmpty):
-                        queue.get_nowait()
-                queue.put_nowait(None)
-                continue
-            queue.put_nowait(chunk)
-
     async def preview_loop(self) -> None:
-        """Generate one shared, low-frequency JPEG snapshot from the existing TS buffer."""
+        """Create an occasional JPEG preview from the latest already-generated HLS segment."""
         await asyncio.sleep(5 + (self.camera_id % 7) * 2)
         while True:
             await asyncio.sleep(25)
-            if not self.buffer or self.state not in ("live", "reconnecting"):
-                continue
-            # The latest few chunks are enough for a keyframe search; avoid joining
-            # the entire ring buffer and keep preview decoding deliberately infrequent.
-            payload = b"".join(list(self.buffer)[-24:])
-            if len(payload) < 188 * 10:
-                continue
-            sync = next((offset for offset in range(min(188, len(payload) - 376))
-                         if payload[offset] == 0x47 and payload[offset + 188] == 0x47
-                         and payload[offset + 376] == 0x47), None)
-            if sync is None:
-                continue
-            payload = payload[sync:]
-            args = [FFMPEG, "-hide_banner", "-loglevel", "error",
-                    "-fflags", "+discardcorrupt+genpts", "-analyzeduration", "5M",
-                    "-probesize", "5M", "-skip_frame", "nokey",
-                    "-f", "mpegts", "-i", "pipe:0", "-an", "-frames:v", "1",
-                    "-vf", "scale=480:-2", "-q:v", "7",
-                    "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
-            proc = None
             try:
+                segments = sorted(self.hls_dir.glob("segment_*.ts"), key=lambda p: p.stat().st_mtime_ns)
+                if not segments:
+                    continue
+                segment = segments[-1]
+                if segment.stat().st_size < 188 * 10:
+                    continue
+                args = [FFMPEG, "-hide_banner", "-loglevel", "error",
+                        "-skip_frame", "nokey", "-i", str(segment), "-an", "-frames:v", "1",
+                        "-vf", "scale=480:-2", "-q:v", "7",
+                        "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
                 proc = await asyncio.create_subprocess_exec(
-                    *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL)
-                stdout, _ = await asyncio.wait_for(proc.communicate(payload), timeout=6)
+                    *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
                 if stdout.startswith(bytes((255, 216))):
                     self.preview = stdout
             except asyncio.CancelledError:
-                if proc and proc.returncode is None:
-                    proc.kill()
-                    with suppress(Exception):
-                        await proc.wait()
                 raise
             except Exception as exc:
                 log.debug("Preview generation skipped camera=%d: %s", self.camera_id, exc)
-                if proc and proc.returncode is None:
-                    proc.kill()
-                    with suppress(Exception):
-                        await proc.wait()
 
     async def run(self) -> None:
         while True:
@@ -227,45 +180,57 @@ class CameraStream:
             self.codec = "unknown"
             self.width = None
             self.height = None
-            self.buffer.clear()
+            self.hls_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.rmtree(self.hls_dir, ignore_errors=True)
+            self.hls_dir.mkdir(parents=True, exist_ok=True)
             await self.probe(camera.url)
+            segment_seconds = "1" if config.settings.low_latency else "2"
             args = [FFMPEG, "-hide_banner", "-loglevel", "warning", "-nostdin",
-                    "-rtsp_transport", "tcp",
-                    "-fflags", "nobuffer", "-flags", "low_delay",
+                    "-rtsp_transport", "tcp", "-fflags", "nobuffer", "-flags", "low_delay",
                     "-i", camera.url, "-map", "0:v:0", "-c:v", "copy"]
             if camera.audio:
                 args += ["-map", "0:a:0?", "-c:a", "copy"]
             else:
                 args += ["-an"]
-            args += ["-muxdelay", "0", "-muxpreload", "0", "-mpegts_flags", "+resend_headers",
-                     "-flush_packets", "1", "-f", "mpegts", "pipe:1"]
+            args += ["-f", "hls", "-hls_time", segment_seconds, "-hls_list_size", "6",
+                     "-hls_delete_threshold", "2",
+                     "-hls_flags", "delete_segments+omit_endlist+independent_segments+temp_file",
+                     "-hls_segment_type", "mpegts",
+                     "-hls_segment_filename", str(self.hls_dir / "segment_%09d.ts"),
+                     str(self.hls_dir / "playlist.m3u8")]
             proc = None
+            last_segment_mtime = 0
+            start_time = time.monotonic()
             try:
-                proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
+                proc = await asyncio.create_subprocess_exec(
+                    *args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
                 self.process = proc
-                self.state = "connecting"
-                log.info("RTSP relay process started camera=%d codec=%s pid=%d", self.camera_id, self.codec, proc.pid)
-                assert proc.stdout is not None
-                while True:
-                    try:
-                        chunk = await asyncio.wait_for(proc.stdout.read(188 * 348), timeout=30)
-                    except asyncio.TimeoutError:
-                        self.last_error = "No stream data received for 30 seconds"
-                        log.warning("RTSP stream stalled camera=%d pid=%d; restarting FFmpeg", self.camera_id, proc.pid)
+                log.info("RTSP-to-HLS FFmpeg started camera=%d codec=%s pid=%d segment=%ss",
+                         self.camera_id, self.codec, proc.pid, segment_seconds)
+                while proc.returncode is None:
+                    await asyncio.sleep(1)
+                    segments = list(self.hls_dir.glob("segment_*.ts"))
+                    if segments:
+                        newest = max(segments, key=lambda p: p.stat().st_mtime_ns)
+                        mtime = newest.stat().st_mtime_ns
+                        if newest.stat().st_size > 0 and mtime != last_segment_mtime:
+                            last_segment_mtime = mtime
+                            self.last_data_at = time.monotonic()
+                            if self.state != "live":
+                                self.state = "live"
+                                self.last_error = None
+                                log.info("HLS segment produced camera=%d", self.camera_id)
+                    idle = (time.monotonic() - self.last_data_at
+                            if self.last_data_at is not None else time.monotonic() - start_time)
+                    if idle > 30:
+                        self.last_error = "No HLS segment produced for 30 seconds"
+                        log.warning("HLS output stalled camera=%d pid=%d; restarting FFmpeg",
+                                    self.camera_id, proc.pid)
                         break
-                    if not chunk:
-                        return_code = await proc.wait()
-                        self.last_error = f"FFmpeg exited with code {return_code}"
-                        log.warning("FFmpeg exited camera=%d pid=%d code=%s",
-                                    self.camera_id, proc.pid, return_code)
-                        break
-                    if self.state != "live":
-                        self.state = "live"
-                        self.last_error = None
-                        log.info("RTSP stream is receiving data camera=%d", self.camera_id)
-                    self.last_data_at = time.monotonic()
-                    await self.broadcast(chunk)
+                if proc.returncode is not None:
+                    self.last_error = f"FFmpeg exited with code {proc.returncode}"
+                    log.warning("FFmpeg exited camera=%d code=%s", self.camera_id, proc.returncode)
             except FileNotFoundError:
                 self.state = "error"
                 self.last_error = "FFmpeg executable not found"
@@ -275,7 +240,7 @@ class CameraStream:
                 raise
             except Exception as exc:
                 self.last_error = str(exc)
-                log.exception("Stream relay failed camera=%d", self.camera_id)
+                log.exception("HLS stream failed camera=%d", self.camera_id)
             finally:
                 self.process = None
                 if proc is not None and proc.returncode is None:
@@ -294,7 +259,7 @@ class CameraStream:
                         if self.last_data_at is not None else None)
         effective_state = "stalled" if self.state == "live" and idle_seconds is not None and idle_seconds > 15 else self.state
         return {"id": self.camera_id, "state": effective_state, "codec": self.codec,
-                "width": self.width, "height": self.height, "viewers": len(self.clients),
+                "width": self.width, "height": self.height,
                 "last_data_seconds_ago": idle_seconds, "error": self.last_error}
 
 
@@ -302,13 +267,17 @@ class StreamManager:
     def __init__(self):
         self.streams: dict[int, CameraStream] = {}
 
+    async def _start_camera(self, camera_id: int) -> None:
+        stream = CameraStream(camera_id)
+        self.streams[camera_id] = stream
+        stream.task = asyncio.create_task(stream.run(), name=f"camwall-camera-{camera_id}")
+        stream.preview_task = asyncio.create_task(stream.preview_loop(), name=f"camwall-preview-{camera_id}")
+
     async def start(self) -> None:
+        HLS_DIR.mkdir(parents=True, exist_ok=True)
         for camera_id, camera in enumerate(config.cameras):
             if camera.enabled:
-                stream = CameraStream(camera_id)
-                self.streams[camera_id] = stream
-                stream.task = asyncio.create_task(stream.run(), name=f"camwall-camera-{camera_id}")
-                stream.preview_task = asyncio.create_task(stream.preview_loop(), name=f"camwall-preview-{camera_id}")
+                await self._start_camera(camera_id)
 
     async def restart(self) -> None:
         await self.stop()
@@ -334,10 +303,7 @@ class StreamManager:
                     with suppress(asyncio.CancelledError):
                         await stream.preview_task
             if new and new.enabled:
-                stream = CameraStream(camera_id)
-                self.streams[camera_id] = stream
-                stream.task = asyncio.create_task(stream.run(), name=f"camwall-camera-{camera_id}")
-                stream.preview_task = asyncio.create_task(stream.preview_loop(), name=f"camwall-preview-{camera_id}")
+                await self._start_camera(camera_id)
 
     async def stop(self) -> None:
         tasks = [task for s in self.streams.values() for task in (s.task, s.preview_task) if task]
@@ -347,17 +313,6 @@ class StreamManager:
             with suppress(asyncio.CancelledError):
                 await task
         self.streams.clear()
-
-    async def subscribe(self, camera_id: int) -> asyncio.Queue[bytes | None]:
-        stream = self.streams.get(camera_id)
-        if stream is None:
-            raise KeyError(camera_id)
-        return await stream.subscribe()
-
-    async def unsubscribe(self, camera_id: int, queue: asyncio.Queue[bytes | None]) -> None:
-        stream = self.streams.get(camera_id)
-        if stream:
-            await stream.unsubscribe(queue)
 
     def statuses(self) -> list[dict[str, Any]]:
         return [self.streams[i].status() if i in self.streams else
@@ -554,39 +509,18 @@ async def put_config(payload: dict[str, Any], request: Request):
     return {"ok": True, "cameras": len(config.cameras)}
 
 
-@app.websocket("/ws/stream/{camera_id}")
-async def stream(websocket: WebSocket, camera_id: int):
-    origin = websocket.headers.get("origin", "")
-    host = websocket.headers.get("host", "")
-    from urllib.parse import urlsplit
-    parsed_origin = urlsplit(origin)
-    if not origin or parsed_origin.netloc != host or parsed_origin.scheme not in ("http", "https"):
-        await websocket.close(code=1008, reason="Invalid origin")
-        return
-    session = websocket.scope.get("session", {})
-    issued_at = session.get("issued_at")
-    max_age = 30 * 24 * 60 * 60 if session.get("remember") else 12 * 60 * 60
-    if (not session.get("username") or not isinstance(issued_at, (int, float))
-            or time.time() - issued_at > max_age):
-        await websocket.close(code=1008, reason="Authentication required")
-        return
-    await websocket.accept()
+@app.get("/hls/{camera_id}/{filename}")
+async def get_hls_file(camera_id: int, filename: str, request: Request):
+    require_login(request)
+    if filename != "playlist.m3u8" and not re.fullmatch(r"segment_\d{9}\.ts", filename):
+        raise HTTPException(status_code=404, detail="HLS resource not found")
     if camera_id < 0 or camera_id >= len(config.cameras) or not config.cameras[camera_id].enabled:
-        await websocket.close(code=1008, reason="Unknown or disabled camera")
-        return
-    try:
-        queue = await manager.subscribe(camera_id)
-    except KeyError:
-        await websocket.close(code=1011, reason="Camera stream is not available")
-        return
-    try:
-        while True:
-            chunk = await queue.get()
-            if chunk is None:
-                await websocket.close(code=1013, reason="Viewer cannot keep up with live stream")
-                break
-            await websocket.send_bytes(chunk)
-    except (WebSocketDisconnect, RuntimeError):
-        pass
-    finally:
-        await manager.unsubscribe(camera_id, queue)
+        raise HTTPException(status_code=404, detail="Camera not found")
+    path = HLS_DIR / str(camera_id) / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="HLS resource is not ready")
+    media_type = "application/vnd.apple.mpegurl" if filename == "playlist.m3u8" else "video/mp2t"
+    return FileResponse(path, media_type=media_type,
+                        headers={"Cache-Control": "no-store, max-age=0"})
+
+
