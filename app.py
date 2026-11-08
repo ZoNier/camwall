@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from starlette.middleware.sessions import SessionMiddleware
 from pwdlib import PasswordHash
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
@@ -112,10 +112,8 @@ class CameraStream:
         self.camera_id = camera_id
         self.task: asyncio.Task | None = None
         self.process: asyncio.subprocess.Process | None = None
-        self.clients: set[asyncio.Queue[bytes]] = set()
+        self.clients: set[asyncio.Queue[bytes | None]] = set()
         self.buffer: deque[bytes] = deque(maxlen=128)
-        self.preview: bytes | None = None
-        self.preview_task: asyncio.Task | None = None
         self.state = "starting"
         self.codec = "unknown"
         self.width: int | None = None
@@ -142,8 +140,8 @@ class CameraStream:
             self.last_error = f"ffprobe: {type(exc).__name__}"
             log.warning("Codec probe failed camera=%d: %s", self.camera_id, exc)
 
-    async def subscribe(self) -> asyncio.Queue[bytes]:
-        queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=48)
+    async def subscribe(self) -> asyncio.Queue[bytes | None]:
+        queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=48)
         async with self.lock:
             self.clients.add(queue)
             # Send recent TS data immediately; resend_headers makes MPEG-TS
@@ -153,7 +151,7 @@ class CameraStream:
                     queue.put_nowait(chunk)
         return queue
 
-    async def unsubscribe(self, queue: asyncio.Queue[bytes]) -> None:
+    async def unsubscribe(self, queue: asyncio.Queue[bytes | None]) -> None:
         async with self.lock:
             self.clients.discard(queue)
 
@@ -161,51 +159,15 @@ class CameraStream:
         self.buffer.append(chunk)
         for queue in tuple(self.clients):
             if queue.full():
-                with suppress(asyncio.QueueEmpty):
-                    queue.get_nowait()
-            with suppress(asyncio.QueueFull):
-                queue.put_nowait(chunk)
-
-    async def preview_loop(self) -> None:
-        """Decode one cached frame periodically from the existing MPEG-TS buffer."""
-        while True:
-            await asyncio.sleep(10 + (self.camera_id % 5) * 2)
-            if not self.buffer:
+                # Never drop arbitrary MPEG-TS chunks: that breaks continuity.
+                # Disconnect the slow viewer instead of feeding it corrupted TS.
+                self.clients.discard(queue)
+                while not queue.empty():
+                    with suppress(asyncio.QueueEmpty):
+                        queue.get_nowait()
+                queue.put_nowait(None)
                 continue
-            payload = b"".join(self.buffer)
-            if len(payload) < 188 * 10:
-                continue
-            # Pipe reads may begin in the middle of a 188-byte MPEG-TS packet.
-            sync = next((offset for offset in range(min(188, len(payload) - 376))
-                         if payload[offset] == 0x47 and payload[offset + 188] == 0x47
-                         and payload[offset + 376] == 0x47), None)
-            if sync is None:
-                continue
-            payload = payload[sync:]
-            args = [FFMPEG, "-hide_banner", "-loglevel", "error", "-fflags", "+discardcorrupt+genpts",
-                    "-analyzeduration", "10M", "-probesize", "10M", "-skip_frame", "nokey",
-                    "-f", "mpegts", "-i", "pipe:0", "-an", "-frames:v", "1",
-                    "-vf", "scale=480:-2", "-q:v", "6",
-                    "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
-            proc = None
-            try:
-                proc = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-                stdout, _ = await asyncio.wait_for(proc.communicate(payload), timeout=5)
-                if stdout.startswith(bytes((255, 216))):
-                    self.preview = stdout
-            except asyncio.CancelledError:
-                if proc and proc.returncode is None:
-                    proc.kill()
-                    with suppress(Exception):
-                        await proc.wait()
-                raise
-            except Exception as exc:
-                log.debug("Preview decode skipped camera=%d: %s", self.camera_id, exc)
-                if proc and proc.returncode is None:
-                    proc.kill()
-                    with suppress(Exception):
-                        await proc.wait()
+            queue.put_nowait(chunk)
 
     async def run(self) -> None:
         while True:
@@ -219,7 +181,6 @@ class CameraStream:
             self.width = None
             self.height = None
             self.buffer.clear()
-            self.preview = None
             await self.probe(camera.url)
             args = [FFMPEG, "-hide_banner", "-loglevel", "warning", "-nostdin",
                     "-rtsp_transport", "tcp",
@@ -237,8 +198,6 @@ class CameraStream:
                     stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
                 self.process = proc
                 self.state = "connecting"
-                if self.preview_task is None or self.preview_task.done():
-                    self.preview_task = asyncio.create_task(self.preview_loop(), name=f"camwall-preview-{self.camera_id}")
                 log.info("RTSP relay process started camera=%d codec=%s pid=%d", self.camera_id, self.codec, proc.pid)
                 assert proc.stdout is not None
                 while True:
@@ -283,13 +242,6 @@ class CameraStream:
             self.state = "reconnecting"
             await asyncio.sleep(config.settings.reconnect_seconds)
 
-    async def stop_preview(self) -> None:
-        if self.preview_task:
-            self.preview_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self.preview_task
-            self.preview_task = None
-
     def status(self) -> dict[str, Any]:
         idle_seconds = (round(time.monotonic() - self.last_data_at, 1)
                         if self.last_data_at is not None else None)
@@ -328,7 +280,6 @@ class StreamManager:
                     stream.task.cancel()
                     with suppress(asyncio.CancelledError):
                         await stream.task
-                await stream.stop_preview()
             if new and new.enabled:
                 stream = CameraStream(camera_id)
                 self.streams[camera_id] = stream
@@ -341,17 +292,15 @@ class StreamManager:
         for task in tasks:
             with suppress(asyncio.CancelledError):
                 await task
-        for stream in self.streams.values():
-            await stream.stop_preview()
         self.streams.clear()
 
-    async def subscribe(self, camera_id: int) -> asyncio.Queue[bytes]:
+    async def subscribe(self, camera_id: int) -> asyncio.Queue[bytes | None]:
         stream = self.streams.get(camera_id)
         if stream is None:
             raise KeyError(camera_id)
         return await stream.subscribe()
 
-    async def unsubscribe(self, camera_id: int, queue: asyncio.Queue[bytes]) -> None:
+    async def unsubscribe(self, camera_id: int, queue: asyncio.Queue[bytes | None]) -> None:
         stream = self.streams.get(camera_id)
         if stream:
             await stream.unsubscribe(queue)
@@ -509,16 +458,6 @@ async def get_streams(request: Request):
     return manager.statuses()
 
 
-@app.get("/api/preview/{camera_id}")
-async def get_preview(camera_id: int, request: Request):
-    require_login(request)
-    stream = manager.streams.get(camera_id)
-    if stream is None or stream.preview is None:
-        raise HTTPException(status_code=404, detail="Preview is not ready")
-    return Response(content=stream.preview, media_type="image/jpeg",
-                    headers={"Cache-Control": "no-store, max-age=0"})
-
-
 @app.patch("/api/cameras/{camera_id}/favorite")
 async def set_favorite(camera_id: int, payload: FavoritePayload, request: Request):
     require_same_origin(request)
@@ -578,7 +517,11 @@ async def stream(websocket: WebSocket, camera_id: int):
         return
     try:
         while True:
-            await websocket.send_bytes(await queue.get())
+            chunk = await queue.get()
+            if chunk is None:
+                await websocket.close(code=1013, reason="Viewer cannot keep up with live stream")
+                break
+            await websocket.send_bytes(chunk)
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
