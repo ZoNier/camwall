@@ -52,7 +52,7 @@ git clone --quiet --depth 1 --branch "$BRANCH" "$REPO_URL" "$TMP_DIR/repo"
 SOURCE="$TMP_DIR/repo"
 NEW_COMMIT="$(git -C "$SOURCE" rev-parse HEAD)"
 
-for file in app.py requirements.txt settings.example.json playlist.example.json update.sh uninstall.sh static/index.html static/favicon.svg static/vendor/hls.min.js systemd/camwall.service; do
+for file in app.py requirements.txt settings.example.json playlist.example.json update.sh uninstall.sh static/index.html static/favicon.svg static/vendor/hls.min.js static/vendor/HLSJS-LICENSE.txt systemd/camwall.service; do
   if [[ ! -f "$SOURCE/$file" ]]; then
     echo "Помилка: у репозиторії відсутній файл $file"
     exit 1
@@ -73,6 +73,7 @@ install -o camwall -g camwall -m 0640 "$SOURCE/app.py" "$INSTALL_DIR/app.py"
 install -o camwall -g camwall -m 0640 "$SOURCE/requirements.txt" "$INSTALL_DIR/requirements.txt"
 install -o camwall -g camwall -m 0640 "$SOURCE/static/index.html" "$INSTALL_DIR/static/index.html"
 install -o camwall -g camwall -m 0644 "$SOURCE/static/vendor/hls.min.js" "$INSTALL_DIR/static/vendor/hls.min.js"
+install -o root -g root -m 0644 "$SOURCE/static/vendor/HLSJS-LICENSE.txt" "$INSTALL_DIR/static/vendor/HLSJS-LICENSE.txt"
 install -o root -g root -m 0644 "$SOURCE/static/favicon.svg" "$INSTALL_DIR/static/favicon.svg"
 install -o root -g root -m 0750 "$SOURCE/update.sh" "$INSTALL_DIR/update.sh"
 install -o root -g root -m 0750 "$SOURCE/uninstall.sh" "$INSTALL_DIR/uninstall.sh"
