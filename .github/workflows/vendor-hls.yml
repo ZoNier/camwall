@@ -1,0 +1,41 @@
+name: Vendor HLS.js
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/vendor-hls.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  vendor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download pinned HLS.js package
+        run: |
+          set -euo pipefail
+          mkdir -p static/vendor
+          PACKAGE="$(npm pack hls.js@1.7.4 --silent)"
+          tar -xzf "$PACKAGE" package/dist/hls.min.js package/LICENSE
+          install -m 0644 package/dist/hls.min.js static/vendor/hls.min.js
+          install -m 0644 package/LICENSE static/vendor/HLSJS-LICENSE.txt
+          rm -f "$PACKAGE"
+      - name: Commit vendored library
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- static/vendor; then
+            echo "Vendored HLS.js is already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add static/vendor/hls.min.js static/vendor/HLSJS-LICENSE.txt
+          git commit -m "Vendor HLS.js 1.7.4 for offline deployments"
+          git push
