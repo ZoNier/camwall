@@ -122,17 +122,7 @@ class CameraStream:
         self.height: int | None = None
         self.last_error: str | None = None
         self.last_data_at: float | None = None
-        self.ffmpeg_stderr: deque[str] = deque(maxlen=20)
         self.lock = asyncio.Lock()
-
-    async def capture_stderr(self, reader: asyncio.StreamReader) -> None:
-        while True:
-            line = await reader.readline()
-            if not line:
-                break
-            message = line.decode("utf-8", errors="replace").strip()
-            if message:
-                self.ffmpeg_stderr.append(message)
 
     async def probe(self, url: str) -> None:
         args = [FFPROBE, "-v", "error", "-rtsp_transport", "tcp", "-select_streams", "v:0",
@@ -225,7 +215,6 @@ class CameraStream:
                 return
             self.state = "connecting"
             self.last_data_at = None
-            self.ffmpeg_stderr.clear()
             self.codec = "unknown"
             self.width = None
             self.height = None
@@ -233,7 +222,7 @@ class CameraStream:
             self.preview = None
             await self.probe(camera.url)
             args = [FFMPEG, "-hide_banner", "-loglevel", "warning", "-nostdin",
-                    "-rtsp_transport", "tcp", "-rw_timeout", "15000000",
+                    "-rtsp_transport", "tcp",
                     "-fflags", "nobuffer", "-flags", "low_delay",
                     "-i", camera.url, "-map", "0:v:0", "-c:v", "copy"]
             if camera.audio:
@@ -245,9 +234,8 @@ class CameraStream:
             proc = None
             try:
                 proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE, start_new_session=True)
+                    stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
                 self.process = proc
-                stderr_task = asyncio.create_task(self.capture_stderr(proc.stderr))
                 self.state = "connecting"
                 if self.preview_task is None or self.preview_task.done():
                     self.preview_task = asyncio.create_task(self.preview_loop(), name=f"camwall-preview-{self.camera_id}")
@@ -262,11 +250,9 @@ class CameraStream:
                         break
                     if not chunk:
                         return_code = await proc.wait()
-                        await stderr_task
-                        details = " | ".join(self.ffmpeg_stderr)
-                        self.last_error = f"FFmpeg exited with code {return_code}" + (f": {details}" if details else "")
-                        log.warning("FFmpeg exited camera=%d pid=%d code=%s stderr=%s",
-                                    self.camera_id, proc.pid, return_code, details or "(empty)")
+                        self.last_error = f"FFmpeg exited with code {return_code}"
+                        log.warning("FFmpeg exited camera=%d pid=%d code=%s",
+                                    self.camera_id, proc.pid, return_code)
                         break
                     if self.state != "live":
                         self.state = "live"
@@ -294,10 +280,6 @@ class CameraStream:
                     except asyncio.TimeoutError:
                         proc.kill()
                         await proc.wait()
-                if "stderr_task" in locals() and not stderr_task.done():
-                    with suppress(asyncio.CancelledError):
-                        await stderr_task
-                stderr_task = None
             self.state = "reconnecting"
             await asyncio.sleep(config.settings.reconnect_seconds)
 
