@@ -292,7 +292,8 @@ class CameraStream:
     def status(self) -> dict[str, Any]:
         idle_seconds = (round(time.monotonic() - self.last_data_at, 1)
                         if self.last_data_at is not None else None)
-        return {"id": self.camera_id, "state": self.state, "codec": self.codec,
+        effective_state = "stalled" if self.state == "live" and idle_seconds is not None and idle_seconds > 15 else self.state
+        return {"id": self.camera_id, "state": effective_state, "codec": self.codec,
                 "width": self.width, "height": self.height, "viewers": len(self.clients),
                 "last_data_seconds_ago": idle_seconds, "error": self.last_error}
 
