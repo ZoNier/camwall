@@ -106,7 +106,7 @@ function playerFor(cam,video,overlay,status,vwrap,playBtn,muteBtn,fullBtn){
 let player=null,started=false;
 const setPlayLabel=playing=>{playBtn.textContent=playing?"Ⅱ":"▶";playBtn.title=playing?"Пауза":"Відтворити"};
 const showError=message=>{status.className="dot";video.classList.remove("playing");vwrap.classList.remove("has-video");overlay.classList.remove("hidden");overlay.textContent=message};
-const destroyPlayer=()=>{if(player){try{player.destroy()}catch{}player=null}players.delete(cam.id);started=false};
+const destroyPlayer=()=>{if(player){try{player.destroy()}catch{}player=null}players.delete(cam.id);started=false;video.pause();video.removeAttribute("src");video.load();video.classList.remove("playing");vwrap.classList.remove("has-video");overlay.classList.remove("hidden");setPlayLabel(false)};
 const start=()=>{
  if(started){video.play().catch(()=>{});return}
  if(!window.mpegts||!mpegts.isSupported()){showError("Браузер не підтримує MPEG-TS/MSE");return}
@@ -121,7 +121,7 @@ const start=()=>{
 };
 video.addEventListener("playing",()=>{status.className="dot live";video.classList.add("playing");vwrap.classList.add("has-video");overlay.classList.add("hidden");setPlayLabel(true)});
 video.addEventListener("pause",()=>setPlayLabel(false));
-playBtn.onclick=()=>{if(!started)start();else if(video.paused)video.play().catch(()=>{});else video.pause()};
+playBtn.onclick=()=>{if(!started){start();return}if(video.paused){video.play().catch(()=>{});return}destroyPlayer();overlay.textContent="Натисни ▶, щоб переглянути відео"};
 muteBtn.onclick=()=>{video.muted=!video.muted;muteBtn.textContent=video.muted?"Звук вимкнено":"Звук увімкнено"};
 fullBtn.onclick=()=>{if(document.fullscreenElement){document.exitFullscreen?.();return}if(vwrap.requestFullscreen)vwrap.requestFullscreen().catch(()=>{});else if(video.webkitEnterFullscreen)video.webkitEnterFullscreen()};
 overlay.onclick=()=>start();
