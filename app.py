@@ -8,7 +8,6 @@ import re
 import shutil
 import signal
 import time
-from collections import deque
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -160,6 +159,7 @@ class CameraStream:
                     continue
                 preview_input = self.hls_dir / ".preview-input.mp4"
                 preview_input.write_bytes(init_segment.read_bytes() + segment.read_bytes())
+                proc = None
                 try:
                     args = [FFMPEG, "-hide_banner", "-loglevel", "error",
                             "-skip_frame", "nokey", "-i", str(preview_input), "-an", "-frames:v", "1",
@@ -170,6 +170,12 @@ class CameraStream:
                     stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
                     if stdout.startswith(bytes((255, 216))):
                         self.preview = stdout
+                except asyncio.CancelledError:
+                    if proc and proc.returncode is None:
+                        proc.kill()
+                        with suppress(Exception):
+                            await proc.wait()
+                    raise
                 finally:
                     preview_input.unlink(missing_ok=True)
             except asyncio.CancelledError:
