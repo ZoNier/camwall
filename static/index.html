@@ -105,7 +105,7 @@ function applySettings(){grid.style.setProperty("--cols",cfg.settings.grid_colum
 function playerFor(cam,video,overlay,status,vwrap,playBtn,muteBtn,fullBtn){
 let player=null,started=false;
 const setPlayLabel=playing=>{playBtn.textContent=playing?"Ⅱ":"▶";playBtn.title=playing?"Пауза":"Відтворити"};
-const showError=message=>{status.className="dot";vwrap.classList.remove("has-video");overlay.classList.remove("hidden");overlay.textContent=message};
+const showError=message=>{status.className="dot";video.classList.remove("playing");vwrap.classList.remove("has-video");overlay.classList.remove("hidden");overlay.textContent=message};
 const destroyPlayer=()=>{if(player){try{player.destroy()}catch{}player=null}players.delete(cam.id);started=false};
 const start=()=>{
  if(started){video.play().catch(()=>{});return}
