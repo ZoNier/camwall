@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from starlette.middleware.sessions import SessionMiddleware
 from pwdlib import PasswordHash
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
@@ -114,6 +114,8 @@ class CameraStream:
         self.process: asyncio.subprocess.Process | None = None
         self.clients: set[asyncio.Queue[bytes | None]] = set()
         self.buffer: deque[bytes] = deque(maxlen=128)
+        self.preview: bytes | None = None
+        self.preview_task: asyncio.Task | None = None
         self.state = "starting"
         self.codec = "unknown"
         self.width: int | None = None
@@ -168,6 +170,51 @@ class CameraStream:
                 queue.put_nowait(None)
                 continue
             queue.put_nowait(chunk)
+
+    async def preview_loop(self) -> None:
+        """Generate one shared, low-frequency JPEG snapshot from the existing TS buffer."""
+        await asyncio.sleep(5 + (self.camera_id % 7) * 2)
+        while True:
+            await asyncio.sleep(25)
+            if not self.buffer or self.state not in ("live", "reconnecting"):
+                continue
+            # The latest few chunks are enough for a keyframe search; avoid joining
+            # the entire ring buffer and keep preview decoding deliberately infrequent.
+            payload = b"".join(list(self.buffer)[-24:])
+            if len(payload) < 188 * 10:
+                continue
+            sync = next((offset for offset in range(min(188, len(payload) - 376))
+                         if payload[offset] == 0x47 and payload[offset + 188] == 0x47
+                         and payload[offset + 376] == 0x47), None)
+            if sync is None:
+                continue
+            payload = payload[sync:]
+            args = [FFMPEG, "-hide_banner", "-loglevel", "error",
+                    "-fflags", "+discardcorrupt+genpts", "-analyzeduration", "5M",
+                    "-probesize", "5M", "-skip_frame", "nokey",
+                    "-f", "mpegts", "-i", "pipe:0", "-an", "-frames:v", "1",
+                    "-vf", "scale=480:-2", "-q:v", "7",
+                    "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
+            proc = None
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL)
+                stdout, _ = await asyncio.wait_for(proc.communicate(payload), timeout=6)
+                if stdout.startswith(bytes((255, 216))):
+                    self.preview = stdout
+            except asyncio.CancelledError:
+                if proc and proc.returncode is None:
+                    proc.kill()
+                    with suppress(Exception):
+                        await proc.wait()
+                raise
+            except Exception as exc:
+                log.debug("Preview generation skipped camera=%d: %s", self.camera_id, exc)
+                if proc and proc.returncode is None:
+                    proc.kill()
+                    with suppress(Exception):
+                        await proc.wait()
 
     async def run(self) -> None:
         while True:
@@ -260,6 +307,7 @@ class StreamManager:
                 stream = CameraStream(camera_id)
                 self.streams[camera_id] = stream
                 stream.task = asyncio.create_task(stream.run(), name=f"camwall-camera-{camera_id}")
+                stream.preview_task = asyncio.create_task(stream.preview_loop(), name=f"camwall-preview-{camera_id}")
 
     async def restart(self) -> None:
         await self.stop()
@@ -280,13 +328,18 @@ class StreamManager:
                     stream.task.cancel()
                     with suppress(asyncio.CancelledError):
                         await stream.task
+                if stream.preview_task:
+                    stream.preview_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await stream.preview_task
             if new and new.enabled:
                 stream = CameraStream(camera_id)
                 self.streams[camera_id] = stream
                 stream.task = asyncio.create_task(stream.run(), name=f"camwall-camera-{camera_id}")
+                stream.preview_task = asyncio.create_task(stream.preview_loop(), name=f"camwall-preview-{camera_id}")
 
     async def stop(self) -> None:
-        tasks = [s.task for s in self.streams.values() if s.task]
+        tasks = [task for s in self.streams.values() for task in (s.task, s.preview_task) if task]
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -456,6 +509,16 @@ async def get_config(request: Request):
 async def get_streams(request: Request):
     require_login(request)
     return manager.statuses()
+
+
+@app.get("/api/preview/{camera_id}")
+async def get_preview(camera_id: int, request: Request):
+    require_login(request)
+    stream = manager.streams.get(camera_id)
+    if stream is None or stream.preview is None:
+        raise HTTPException(status_code=404, detail="Preview is not ready")
+    return Response(content=stream.preview, media_type="image/jpeg",
+                    headers={"Cache-Control": "no-store, max-age=0"})
 
 
 @app.patch("/api/cameras/{camera_id}/favorite")
