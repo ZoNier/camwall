@@ -11,7 +11,7 @@ INSTALL_DIR="${CAMWALL_INSTALL_DIR:-/opt/camwall}"
 SERVICE="${CAMWALL_SERVICE:-camwall}"
 APP_USER="camwall"
 
-for file in app.py requirements.txt playlist.example.json settings.example.json static/index.html static/favicon.svg systemd/camwall.service update.sh uninstall.sh; do
+for file in app.py requirements.txt playlist.example.json settings.example.json static/index.html static/favicon.svg static/vendor/hls.min.js systemd/camwall.service update.sh uninstall.sh; do
   if [[ ! -f "$APP_DIR/$file" ]]; then
     echo "Помилка: не знайдено $APP_DIR/$file" >&2
     exit 1
@@ -26,7 +26,7 @@ if ! id "$APP_USER" >/dev/null 2>&1; then
   useradd --system --home-dir "$INSTALL_DIR" --shell /usr/sbin/nologin "$APP_USER"
 fi
 
-install -d -o "$APP_USER" -g "$APP_USER" -m 0750 "$INSTALL_DIR" "$INSTALL_DIR/static" "$INSTALL_DIR/hls"
+install -d -o "$APP_USER" -g "$APP_USER" -m 0750 "$INSTALL_DIR" "$INSTALL_DIR/static" "$INSTALL_DIR/static/vendor" "$INSTALL_DIR/hls"
 
 # Preserve existing camera and UI configuration on reinstall.
 if [[ ! -f "$INSTALL_DIR/playlist.json" ]]; then
@@ -39,6 +39,7 @@ fi
 install -o "$APP_USER" -g "$APP_USER" -m 0640 "$APP_DIR/app.py" "$INSTALL_DIR/app.py"
 install -o "$APP_USER" -g "$APP_USER" -m 0640 "$APP_DIR/requirements.txt" "$INSTALL_DIR/requirements.txt"
 install -o "$APP_USER" -g "$APP_USER" -m 0640 "$APP_DIR/static/index.html" "$INSTALL_DIR/static/index.html"
+install -o "$APP_USER" -g "$APP_USER" -m 0644 "$APP_DIR/static/vendor/hls.min.js" "$INSTALL_DIR/static/vendor/hls.min.js"
 install -o root -g root -m 0644 "$APP_DIR/static/favicon.svg" "$INSTALL_DIR/static/favicon.svg"
 install -o root -g root -m 0750 "$APP_DIR/update.sh" "$INSTALL_DIR/update.sh"
 install -o root -g root -m 0750 "$APP_DIR/uninstall.sh" "$INSTALL_DIR/uninstall.sh"
