@@ -18,6 +18,75 @@
 :root[data-theme="light"] .camicon{background:#e5f4f0;color:#087f68}
 :root[data-theme="light"] .overlay{background:#ffffff88;color:#334155}
 :root[data-theme="light"] .toast{background:#fff;color:#172235;border-color:#cbd5e1}
+
+/* Responsive layout refinements */
+@media(max-width:760px){
+  body{font-size:14px}
+  .shell{padding:0 14px calc(24px + env(safe-area-inset-bottom))}
+  .top{height:auto;min-height:0;padding:12px 0;flex-wrap:wrap;row-gap:12px}
+  .logo{width:38px;height:38px;border-radius:12px;flex:0 0 38px}
+  .brand{font-size:17px;line-height:1.2}
+  .brand small{font-size:9px;letter-spacing:1.4px;margin-top:3px}
+  .actions{width:100%;margin-left:0;display:grid;grid-template-columns:1fr 1.35fr auto;gap:7px}
+  .actions button{min-width:0;padding:10px 8px;font-size:12px;white-space:nowrap}
+  .hero{margin:22px 0 16px;gap:12px}
+  .hero h1{font-size:29px}
+  .hero p{font-size:13px}
+  .toolbar{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+  .toolbar button{min-width:0;padding:10px 8px;font-size:12px}
+  .toolbar .spacer{display:none}
+  .toolbar .search{grid-column:1/-1;width:100%;min-width:0}
+  .grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .camera{border-radius:12px}
+  .camhead{gap:7px;padding:9px}
+  .camicon{width:29px;height:29px;flex:0 0 29px}
+  .camname strong{font-size:13px}
+  .camname small{font-size:10px}
+  .camhead button{padding:5px 8px;min-width:32px}
+  .foot{padding:7px 9px;font-size:10px;gap:6px}
+  dialog{width:calc(100% - 16px);max-width:none;max-height:92dvh;border-radius:16px}
+  .modalhead{padding:13px 14px;flex-wrap:wrap;gap:8px}
+  .modalhead h2{font-size:18px}
+  .modalbody{padding:14px}
+  .modalfoot{padding:12px 14px;gap:8px;flex-wrap:wrap}
+  .modalfoot button{flex:1 1 auto}
+  .formgrid{grid-template-columns:minmax(0,1fr);gap:12px}
+  .field.full{grid-column:auto}
+  .camrow{grid-template-columns:minmax(0,1fr) auto;gap:7px;padding:9px}
+  .camrow .url{grid-column:1/-1;grid-row:2;min-width:0}
+  .camrow strong{min-width:0;overflow-wrap:anywhere}
+  .login-card{padding:24px}
+  .toast{right:12px;bottom:calc(12px + env(safe-area-inset-bottom));max-width:calc(100% - 24px)}
+}
+@media(max-width:480px){
+  .shell{padding-left:10px;padding-right:10px}
+  .top{column-gap:9px}
+  .actions{grid-template-columns:1fr 1.35fr auto}
+  .actions button{font-size:11px;padding:9px 6px}
+  .hero h1{font-size:26px}
+  .hero p{max-width:34ch}
+  .grid{grid-template-columns:minmax(0,1fr);gap:12px}
+  .camhead{padding:10px 11px}
+  .camname strong{font-size:14px}
+  .camname small{font-size:11px}
+  .camicon{width:32px;height:32px;flex-basis:32px}
+  .video{aspect-ratio:16/9}
+  .foot{font-size:11px;padding:8px 11px}
+  .stats{display:none}
+  .toolbar{grid-template-columns:1fr 1fr}
+  .toolbar button{font-size:13px}
+  .modalhead{padding:12px}
+  .modalbody{padding:12px}
+  .modalfoot{padding:10px 12px}
+  .camrow{grid-template-columns:minmax(0,1fr) auto}
+}
+@media(max-width:360px){
+  .brand{font-size:15px}
+  .actions{grid-template-columns:1fr 1fr}
+  .actions #logoutBtn{grid-column:1/-1}
+  .hero h1{font-size:24px}
+}
+
 </style></head>
 <body><section id="loginScreen" class="login-screen" hidden><div class="login-card"><div class="logo">C</div><div class="eyebrow" style="margin-top:18px">CAMWALL SECURITY</div><h1>Вхід до CamWall</h1><p>Увійди, щоб переглядати камери та керувати системою.</p><form id="loginForm"><div class="field"><label for="loginUser">Користувач</label><input id="loginUser" autocomplete="username" value="admin" required></div><div class="field"><label for="loginPassword">Пароль</label><input id="loginPassword" type="password" autocomplete="current-password" required></div><label class="check"><input id="rememberMe" type="checkbox"> Запам'ятати мене на 30 днів</label><div id="loginError" class="login-error"></div><button type="submit" class="primary">Увійти</button></form></div></section><main class="shell" id="appShell" hidden>
 <header class="top"><div class="logo">C</div><div class="brand">CamWall<small>RTSP VIDEO WALL</small></div><div class="actions"><span id="health" class="dot"></span><button id="refresh">↻ Оновити</button><button class="primary" id="settingsBtn">⚙ Налаштування</button><button id="logoutBtn" title="Вийти">Вийти</button></div></header>
