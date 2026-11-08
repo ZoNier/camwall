@@ -60,7 +60,7 @@ for file in app.py requirements.txt settings.example.json playlist.example.json 
 done
 
 echo "Оновлюю файли застосунку (камери та settings.json не перезаписуються)..."
-install -d -o camwall -g camwall -m 0750 "$INSTALL_DIR" "$INSTALL_DIR/static"
+install -d -o camwall -g camwall -m 0750 "$INSTALL_DIR" "$INSTALL_DIR/static" "$INSTALL_DIR/hls"
 
 if [[ ! -f "$INSTALL_DIR/playlist.json" ]]; then
   install -o camwall -g camwall -m 0600 "$SOURCE/playlist.example.json" "$INSTALL_DIR/playlist.json"
