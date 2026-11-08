@@ -149,21 +149,29 @@ class CameraStream:
         while True:
             await asyncio.sleep(25)
             try:
-                segments = sorted(self.hls_dir.glob("segment_*.ts"), key=lambda p: p.stat().st_mtime_ns)
+                segments = sorted(self.hls_dir.glob("segment_*.m4s"), key=lambda p: p.stat().st_mtime_ns)
                 if not segments:
                     continue
                 segment = segments[-1]
                 if segment.stat().st_size < 188 * 10:
                     continue
-                args = [FFMPEG, "-hide_banner", "-loglevel", "error",
-                        "-skip_frame", "nokey", "-i", str(segment), "-an", "-frames:v", "1",
-                        "-vf", "scale=480:-2", "-q:v", "7",
-                        "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
-                proc = await asyncio.create_subprocess_exec(
-                    *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
-                if stdout.startswith(bytes((255, 216))):
-                    self.preview = stdout
+                init_segment = self.hls_dir / "init.mp4"
+                if not init_segment.is_file():
+                    continue
+                preview_input = self.hls_dir / ".preview-input.mp4"
+                preview_input.write_bytes(init_segment.read_bytes() + segment.read_bytes())
+                try:
+                    args = [FFMPEG, "-hide_banner", "-loglevel", "error",
+                            "-skip_frame", "nokey", "-i", str(preview_input), "-an", "-frames:v", "1",
+                            "-vf", "scale=480:-2", "-q:v", "7",
+                            "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
+                    proc = await asyncio.create_subprocess_exec(
+                        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
+                    if stdout.startswith(bytes((255, 216))):
+                        self.preview = stdout
+                finally:
+                    preview_input.unlink(missing_ok=True)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -195,8 +203,8 @@ class CameraStream:
             args += ["-f", "hls", "-hls_time", segment_seconds, "-hls_list_size", "6",
                      "-hls_delete_threshold", "2",
                      "-hls_flags", "delete_segments+omit_endlist+independent_segments+temp_file",
-                     "-hls_segment_type", "mpegts",
-                     "-hls_segment_filename", str(self.hls_dir / "segment_%09d.ts"),
+                     "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
+                     "-hls_segment_filename", str(self.hls_dir / "segment_%09d.m4s"),
                      str(self.hls_dir / "playlist.m3u8")]
             proc = None
             last_segment_mtime = 0
@@ -210,7 +218,7 @@ class CameraStream:
                          self.camera_id, self.codec, proc.pid, segment_seconds)
                 while proc.returncode is None:
                     await asyncio.sleep(1)
-                    segments = list(self.hls_dir.glob("segment_*.ts"))
+                    segments = list(self.hls_dir.glob("segment_*.m4s"))
                     if segments:
                         newest = max(segments, key=lambda p: p.stat().st_mtime_ns)
                         mtime = newest.stat().st_mtime_ns
@@ -512,14 +520,15 @@ async def put_config(payload: dict[str, Any], request: Request):
 @app.get("/hls/{camera_id}/{filename}")
 async def get_hls_file(camera_id: int, filename: str, request: Request):
     require_login(request)
-    if filename != "playlist.m3u8" and not re.fullmatch(r"segment_\d{9}\.ts", filename):
+    if filename not in ("playlist.m3u8", "init.mp4") and not re.fullmatch(r"segment_\d{9}\.m4s", filename):
         raise HTTPException(status_code=404, detail="HLS resource not found")
     if camera_id < 0 or camera_id >= len(config.cameras) or not config.cameras[camera_id].enabled:
         raise HTTPException(status_code=404, detail="Camera not found")
     path = HLS_DIR / str(camera_id) / filename
     if not path.is_file():
         raise HTTPException(status_code=404, detail="HLS resource is not ready")
-    media_type = "application/vnd.apple.mpegurl" if filename == "playlist.m3u8" else "video/mp2t"
+    media_type = ("application/vnd.apple.mpegurl" if filename == "playlist.m3u8"
+                  else "video/mp4")
     return FileResponse(path, media_type=media_type,
                         headers={"Cache-Control": "no-store, max-age=0"})
 
