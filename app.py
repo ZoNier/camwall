@@ -121,6 +121,7 @@ class CameraStream:
         self.width: int | None = None
         self.height: int | None = None
         self.last_error: str | None = None
+        self.last_data_at: float | None = None
         self.lock = asyncio.Lock()
 
     async def probe(self, url: str) -> None:
@@ -214,9 +215,16 @@ class CameraStream:
                 return
             self.state = "connecting"
             self.last_error = None
+            self.last_data_at = None
+            self.codec = "unknown"
+            self.width = None
+            self.height = None
+            self.buffer.clear()
+            self.preview = None
             await self.probe(camera.url)
             args = [FFMPEG, "-hide_banner", "-loglevel", "warning", "-nostdin",
-                    "-rtsp_transport", "tcp", "-fflags", "nobuffer", "-flags", "low_delay",
+                    "-rtsp_transport", "tcp", "-rw_timeout", "15000000",
+                    "-fflags", "nobuffer", "-flags", "low_delay",
                     "-i", camera.url, "-map", "0:v:0", "-c:v", "copy"]
             if camera.audio:
                 args += ["-map", "0:a:0?", "-c:a", "copy"]
@@ -229,15 +237,25 @@ class CameraStream:
                 proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
                 self.process = proc
-                self.state = "live"
+                self.state = "connecting"
                 if self.preview_task is None or self.preview_task.done():
                     self.preview_task = asyncio.create_task(self.preview_loop(), name=f"camwall-preview-{self.camera_id}")
-                log.info("RTSP relay started camera=%d codec=%s pid=%d", self.camera_id, self.codec, proc.pid)
+                log.info("RTSP relay process started camera=%d codec=%s pid=%d", self.camera_id, self.codec, proc.pid)
                 assert proc.stdout is not None
                 while True:
-                    chunk = await proc.stdout.read(188 * 348)
-                    if not chunk:
+                    try:
+                        chunk = await asyncio.wait_for(proc.stdout.read(188 * 348), timeout=30)
+                    except asyncio.TimeoutError:
+                        self.last_error = "No stream data received for 30 seconds"
+                        log.warning("RTSP stream stalled camera=%d pid=%d; restarting FFmpeg", self.camera_id, proc.pid)
                         break
+                    if not chunk:
+                        self.last_error = "FFmpeg stream ended"
+                        break
+                    if self.state != "live":
+                        self.state = "live"
+                        log.info("RTSP stream is receiving data camera=%d", self.camera_id)
+                    self.last_data_at = time.monotonic()
                     await self.broadcast(chunk)
             except FileNotFoundError:
                 self.state = "error"
@@ -270,9 +288,11 @@ class CameraStream:
             self.preview_task = None
 
     def status(self) -> dict[str, Any]:
+        idle_seconds = (round(time.monotonic() - self.last_data_at, 1)
+                        if self.last_data_at is not None else None)
         return {"id": self.camera_id, "state": self.state, "codec": self.codec,
                 "width": self.width, "height": self.height, "viewers": len(self.clients),
-                "error": self.last_error}
+                "last_data_seconds_ago": idle_seconds, "error": self.last_error}
 
 
 class StreamManager:
@@ -465,8 +485,11 @@ async def index():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "cameras": len(config.cameras), "ffmpeg": FFMPEG,
-            "ingest": manager.statuses()}
+    ingest = manager.statuses()
+    enabled_ids = [i for i, camera in enumerate(config.cameras) if camera.enabled]
+    healthy = all(i < len(ingest) and ingest[i]["state"] == "live" for i in enabled_ids)
+    return {"status": "ok" if healthy else "degraded", "cameras": len(config.cameras),
+            "ffmpeg": FFMPEG, "ingest": ingest}
 
 
 @app.get("/api/config")
