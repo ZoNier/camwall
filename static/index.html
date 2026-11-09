@@ -107,7 +107,7 @@ async function api(url,opts={}){
   if(!r.ok){
    const messages={400:"Некоректний запит",401:"Сесія завершилася. Увійди знову.",403:"Доступ заборонено",404:"Запитаний ресурс не знайдено",409:"Конфлікт даних",422:"Перевір правильність введених даних",429:"Забагато запитів. Спробуй трохи пізніше"};
    const detail=typeof body.detail==="string"?body.detail:"";const error=new Error(detail||messages[r.status]||("Помилка сервера: HTTP "+r.status));error.status=r.status;error.url=url;
-   if(r.status===401&&url!=="/api/auth/login"){showLogin();toast(messages[401],true)}throw error;
+   if(r.status===401&&url!=="/api/auth/login")showLogin();throw error;
   }
   return body;
  }catch(error){
@@ -160,9 +160,9 @@ function render(){const visible=[];const ids=new Set(cfg.cameras.map((_,id)=>id)
 let statusPollBusy=false,statusPollErrorShown=false;
 async function refreshStatuses(){
  if(statusPollBusy||document.hidden||$("#appShell").hidden)return;statusPollBusy=true;
- try{streamInfo=await api("/api/streams");statusPollErrorShown=false;
+ try{streamInfo=await api("/api/streams");statusPollErrorShown=false;$("#health").classList.add("live");
   for(const item of streamInfo){const card=grid.querySelector("[data-camera-id=\""+item.id+"\"]");if(!card)continue;const dot=card.querySelector(".camhead .dot"),foot=card.querySelector(".foot span");if(dot)dot.className="dot"+(item.state==="live"?" live":"");if(foot)foot.textContent=(item.state==="live"?"Приймається · "+(item.codec||"кодек невідомий")+(item.width&&item.height?" · "+item.width+"×"+item.height:""):item.state==="reconnecting"?"Перепідключення…":item.state==="connecting"?"Підключення…":item.state==="error"?"Помилка потоку":item.state==="stalled"?"Немає нових даних":item.state)}
- }catch(error){if(!statusPollErrorShown&&error.status!==401){toast(error.message,true);statusPollErrorShown=true}}finally{statusPollBusy=false}
+ }catch(error){$("#health").classList.remove("live");if(!statusPollErrorShown&&error.status!==401){toast(error.message,true);statusPollErrorShown=true}}finally{statusPollBusy=false}
 }
 async function reload(){cfg=await api("/api/config");applySettings();render();$("#health").classList.add("live");await refreshStatuses()}function showLoadError(error){grid.replaceChildren();const box=document.createElement("div");box.className="empty";const message=document.createElement("p");message.textContent="Не вдалося завантажити камери: "+error;const retry=document.createElement("button");retry.className="primary";retry.textContent="Спробувати ще раз";retry.onclick=()=>{retry.disabled=true;retry.textContent="Завантаження…";reload().catch(err=>{message.textContent="Не вдалося завантажити камери: "+err.message;retry.disabled=false;retry.textContent="Спробувати ще раз"})};box.append(message,retry);grid.append(box)}
 async function save(){await api("/api/config",{method:"PUT",body:JSON.stringify(cfg)})}
