@@ -19,6 +19,19 @@
 :root[data-theme="light"] .camicon{background:#e5f4f0;color:#087f68}
 :root[data-theme="light"] .overlay{background:#ffffff88;color:#334155}
 :root[data-theme="light"] .toast{background:#fff;color:#172235;border-color:#cbd5e1}
+/* Light theme: replace remaining dark-surface assumptions with native light surfaces. */
+:root[data-theme="light"] .top{border-color:#dbe3ee}
+:root[data-theme="light"] .camera{box-shadow:0 10px 28px #33415512}
+:root[data-theme="light"] .foot{border-color:#e8edf3}
+:root[data-theme="light"] .search{background:#fff}
+:root[data-theme="light"] .player-controls{background:linear-gradient(transparent,#0f172ab8)}
+:root[data-theme="light"] .player-controls button{color:#fff}
+:root[data-theme="light"] .player-controls button:hover,:root[data-theme="light"] .player-controls button:focus-visible{background:#ffffff26}
+:root[data-theme="light"] .volume-slider{background:#fffffffa!important;border-color:#cbd5e1!important;box-shadow:0 7px 20px #33415524!important}
+:root[data-theme="light"] .modalhead,:root[data-theme="light"] .modalfoot{border-color:#e2e8f0}
+:root[data-theme="light"] dialog::backdrop{background:#33415566}
+:root[data-theme="light"] .empty{background:#f8fafc;border-color:#cbd5e1}
+:root[data-theme="light"] .login-error{color:#b42336}
 
 /* Responsive layout refinements */
 @media(max-width:760px){
@@ -33,6 +46,11 @@
   .hero{margin:22px 0 16px;gap:12px}
   .hero h1{font-size:29px}
   .hero p{font-size:13px}
+  /* Keep LIVE MONITORING and the compact toggle on one stable row. */
+  .hero-head{width:100%;min-width:0;flex-wrap:nowrap;align-items:center}
+  .hero-head .eyebrow{min-width:0;white-space:nowrap}
+  .hero-toggle{flex:0 0 36px;width:36px;height:36px;padding:0;display:grid;place-items:center}
+  .hero-toggle .icon{width:16px;height:16px;display:block;margin:0}
   .toolbar{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
   .toolbar button{min-width:0;padding:10px 8px;font-size:12px}
   .toolbar .spacer{display:none}
@@ -66,6 +84,9 @@
   .actions button{font-size:11px;padding:9px 6px}
   .hero h1{font-size:26px}
   .hero p{max-width:34ch}
+  .hero-head .eyebrow{font-size:10px;letter-spacing:1.5px}
+  .hero-toggle{flex-basis:34px;width:34px;height:34px}
+  .hero-toggle .icon{width:15px;height:15px}
   .grid{grid-template-columns:minmax(0,1fr);gap:12px}
   .camhead{padding:10px 11px}
   .camname strong{font-size:14px}
