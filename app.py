@@ -412,7 +412,7 @@ app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 async def response_cache_policy(request: Request, call_next):
     response = await call_next(request)
     path = request.url.path
-    if path.startswith("/api/") or path == "/health" or path == "/":
+    if (path.startswith("/api/") and not path.startswith("/api/preview/")) or path == "/health" or path == "/":
         response.headers["Cache-Control"] = "no-store"
     elif path.startswith("/static/vendor/"):
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
