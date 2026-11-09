@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import re
 import os
 import re
 import shutil
 import signal
 import time
+from collections import deque
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -117,6 +120,8 @@ class CameraStream:
         self.process: asyncio.subprocess.Process | None = None
         self.hls_dir = HLS_DIR / str(camera_id)
         self.preview: bytes | None = None
+        self.preview_etag: str | None = None
+        self.ffmpeg_stderr: deque[str] = deque(maxlen=20)
         self.state = "starting"
         self.codec = "unknown"
         self.width: int | None = None
@@ -127,10 +132,17 @@ class CameraStream:
     async def probe(self, url: str) -> None:
         args = [FFPROBE, "-v", "error", "-rtsp_transport", "tcp", "-select_streams", "v:0",
                 "-show_entries", "stream=codec_name,width,height", "-of", "json", url]
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL)
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
+                stderr=asyncio.subprocess.PIPE)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=8)
+            if proc.returncode != 0:
+                detail = (stderr or b"").decode("utf-8", "replace").strip()
+                self.last_error = "ffprobe failed" + (f": {detail[-500:]}" if detail else "")
+                log.warning("Codec probe failed camera=%d exit=%s: %s",
+                            self.camera_id, proc.returncode, detail[-500:] or "(no details)")
+                return
             data = json.loads(stdout or b"{}")
             streams = data.get("streams") or []
             if streams:
@@ -138,9 +150,34 @@ class CameraStream:
                 self.codec = str(stream.get("codec_name") or "unknown").lower()
                 self.width = stream.get("width")
                 self.height = stream.get("height")
+            else:
+                self.last_error = "ffprobe: video stream not found"
+        except asyncio.TimeoutError:
+            if proc and proc.returncode is None:
+                proc.kill()
+                with suppress(Exception):
+                    await proc.wait()
+            self.last_error = "ffprobe timed out after 8 seconds"
+            log.warning("Codec probe timed out camera=%d", self.camera_id)
+        except asyncio.CancelledError:
+            if proc and proc.returncode is None:
+                proc.kill()
+                with suppress(Exception):
+                    await proc.wait()
+            raise
         except Exception as exc:
             self.last_error = f"ffprobe: {type(exc).__name__}"
-            log.warning("Codec probe failed camera=%d: %s", self.camera_id, exc)
+            log.warning("Codec probe failed camera=%d: %s", self.camera_id, type(exc).__name__)
+
+    async def capture_stderr(self, reader: asyncio.StreamReader | None) -> None:
+        if reader is None:
+            return
+        while line := await reader.readline():
+            message = line.decode("utf-8", "replace").strip()
+            if not message:
+                continue
+            message = re.sub(r"(?i)(rtsps?://)[^/@\s]+@", r"\1[credentials]@", message)
+            self.ffmpeg_stderr.append(message[-1000:])
 
     async def preview_loop(self) -> None:
         """Create an occasional JPEG preview from the latest already-generated HLS segment."""
@@ -170,6 +207,7 @@ class CameraStream:
                     stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
                     if stdout.startswith(bytes((255, 216))):
                         self.preview = stdout
+                        self.preview_etag = hashlib.sha256(stdout).hexdigest()
                 except asyncio.CancelledError:
                     if proc and proc.returncode is None:
                         proc.kill()
@@ -191,6 +229,7 @@ class CameraStream:
                 return
             self.state = "connecting"
             self.last_data_at = None
+            self.ffmpeg_stderr.clear()
             self.codec = "unknown"
             self.width = None
             self.height = None
@@ -213,13 +252,16 @@ class CameraStream:
                      "-hls_segment_filename", str(self.hls_dir / "segment_%09d.m4s"),
                      str(self.hls_dir / "playlist.m3u8")]
             proc = None
+            stderr_task = None
             last_segment_mtime = 0
             start_time = time.monotonic()
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
+                    stderr=asyncio.subprocess.PIPE, start_new_session=True)
                 self.process = proc
+                stderr_task = asyncio.create_task(self.capture_stderr(proc.stderr),
+                                                  name=f"camwall-stderr-{self.camera_id}")
                 log.info("RTSP-to-HLS FFmpeg started camera=%d codec=%s pid=%d segment=%ss",
                          self.camera_id, self.codec, proc.pid, segment_seconds)
                 while proc.returncode is None:
@@ -243,8 +285,12 @@ class CameraStream:
                                     self.camera_id, proc.pid)
                         break
                 if proc.returncode is not None:
-                    self.last_error = f"FFmpeg exited with code {proc.returncode}"
-                    log.warning("FFmpeg exited camera=%d code=%s", self.camera_id, proc.returncode)
+                    if stderr_task:
+                        await stderr_task
+                    details = " | ".join(self.ffmpeg_stderr)
+                    self.last_error = f"FFmpeg exited with code {proc.returncode}" + (f": {details}" if details else "")
+                    log.warning("FFmpeg exited camera=%d code=%s stderr=%s",
+                                self.camera_id, proc.returncode, details or "(empty)")
             except FileNotFoundError:
                 self.state = "error"
                 self.last_error = "FFmpeg executable not found"
@@ -265,6 +311,9 @@ class CameraStream:
                     except asyncio.TimeoutError:
                         proc.kill()
                         await proc.wait()
+                if stderr_task and not stderr_task.done():
+                    with suppress(asyncio.CancelledError):
+                        await stderr_task
             self.state = "reconnecting"
             await asyncio.sleep(config.settings.reconnect_seconds)
 
@@ -353,6 +402,20 @@ app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, session_cookie=
                    max_age=30 * 24 * 60 * 60, same_site="strict",
                    https_only=os.getenv("CAMWALL_COOKIE_SECURE", "0") == "1")
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+
+@app.middleware("http")
+async def response_cache_policy(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/api/") or path == "/health" or path == "/":
+        response.headers["Cache-Control"] = "no-store"
+    elif path.startswith("/static/vendor/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif path.startswith("/static/"):
+        response.headers["Cache-Control"] = "public, max-age=3600, must-revalidate"
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    return response
 
 
 def auth_record() -> dict[str, str]:
@@ -487,8 +550,15 @@ async def get_preview(camera_id: int, request: Request):
     stream = manager.streams.get(camera_id)
     if stream is None or stream.preview is None:
         raise HTTPException(status_code=404, detail="Preview is not ready")
-    return Response(content=stream.preview, media_type="image/jpeg",
-                    headers={"Cache-Control": "no-store, max-age=0"})
+    etag = f'"{stream.preview_etag}"' if stream.preview_etag else None
+    if etag and request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={
+            "ETag": etag, "Cache-Control": "private, max-age=20"
+        })
+    headers = {"Cache-Control": "private, max-age=20, stale-while-revalidate=10"}
+    if etag:
+        headers["ETag"] = etag
+    return Response(content=stream.preview, media_type="image/jpeg", headers=headers)
 
 
 @app.patch("/api/cameras/{camera_id}/favorite")
@@ -535,7 +605,8 @@ async def get_hls_file(camera_id: int, filename: str, request: Request):
         raise HTTPException(status_code=404, detail="HLS resource is not ready")
     media_type = ("application/vnd.apple.mpegurl" if filename == "playlist.m3u8"
                   else "video/mp4")
+    cache_control = "no-store, max-age=0" if filename == "playlist.m3u8" else "private, no-cache"
     return FileResponse(path, media_type=media_type,
-                        headers={"Cache-Control": "no-store, max-age=0"})
+                        headers={"Cache-Control": cache_control, "X-Content-Type-Options": "nosniff"})
 
 
