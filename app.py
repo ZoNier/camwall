@@ -116,6 +116,7 @@ class CameraStream:
         self.camera_id = camera_id
         self.task: asyncio.Task | None = None
         self.preview_task: asyncio.Task | None = None
+        self.probe_task: asyncio.Task | None = None
         self.process: asyncio.subprocess.Process | None = None
         self.hls_dir = HLS_DIR / str(camera_id)
         self.preview: bytes | None = None
@@ -127,6 +128,7 @@ class CameraStream:
         self.height: int | None = None
         self.last_error: str | None = None
         self.last_data_at: float | None = None
+        self.probe_attempted = False
 
     async def probe(self, url: str) -> None:
         args = [FFPROBE, "-v", "error", "-rtsp_transport", "tcp", "-select_streams", "v:0",
@@ -236,7 +238,8 @@ class CameraStream:
             self.hls_dir.parent.mkdir(parents=True, exist_ok=True)
             shutil.rmtree(self.hls_dir, ignore_errors=True)
             self.hls_dir.mkdir(parents=True, exist_ok=True)
-            await self.probe(camera.url)
+            # ffprobe is diagnostic only. Never block or gate the RTSP-to-HLS pipeline.
+            self.probe_attempted = False
             segment_seconds = "1" if config.settings.low_latency else "2"
             args = [FFMPEG, "-hide_banner", "-loglevel", "warning", "-nostdin",
                     "-rtsp_transport", "tcp", "-fflags", "nobuffer", "-flags", "low_delay",
@@ -277,6 +280,10 @@ class CameraStream:
                                 self.state = "live"
                                 self.last_error = None
                                 log.info("HLS segment produced camera=%d", self.camera_id)
+                                if not self.probe_attempted and self.probe_task is None:
+                                    self.probe_attempted = True
+                                    self.probe_task = asyncio.create_task(
+                                        self.probe(camera.url), name=f"camwall-probe-{self.camera_id}")
                     idle = (time.monotonic() - self.last_data_at
                             if self.last_data_at is not None else time.monotonic() - start_time)
                     if idle > 30:
@@ -303,6 +310,11 @@ class CameraStream:
                 log.exception("HLS stream failed camera=%d", self.camera_id)
             finally:
                 self.process = None
+                if self.probe_task and not self.probe_task.done():
+                    self.probe_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await self.probe_task
+                self.probe_task = None
                 if proc is not None and proc.returncode is None:
                     with suppress(ProcessLookupError):
                         proc.send_signal(signal.SIGTERM)
@@ -346,6 +358,8 @@ class StreamManager:
         for camera_id, camera in enumerate(config.cameras):
             if camera.enabled:
                 await self._start_camera(camera_id)
+                # Avoid a burst of simultaneous RTSP handshakes on camera startup.
+                await asyncio.sleep(0.35)
 
     async def restart(self) -> None:
         await self.stop()
@@ -370,11 +384,15 @@ class StreamManager:
                     stream.preview_task.cancel()
                     with suppress(asyncio.CancelledError):
                         await stream.preview_task
+                if stream.probe_task:
+                    stream.probe_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await stream.probe_task
             if new and new.enabled:
                 await self._start_camera(camera_id)
 
     async def stop(self) -> None:
-        tasks = [task for s in self.streams.values() for task in (s.task, s.preview_task) if task]
+        tasks = [task for s in self.streams.values() for task in (s.task, s.preview_task, s.probe_task) if task]
         for task in tasks:
             task.cancel()
         for task in tasks:
