@@ -120,11 +120,13 @@ function stopPlayers(){for(const p of players.values()){try{p.destroy()}catch{}}
 function applySettings(){grid.style.setProperty("--cols",cfg.settings.grid_columns);$("#layoutBtn").textContent="Сітка: "+cfg.settings.grid_columns+" кол.";document.documentElement.dataset.theme=cfg.settings.theme;document.documentElement.style.colorScheme=cfg.settings.theme==="light"?"light":"dark"}
 const ICONS={play:'<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg>',pause:'<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5v14M15 5v14"/></svg>',fullscreen:'<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5"/></svg>',star:'<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.78 5.63L21 9.54l-4.5 4.38 1.06 6.18L12 17.18 6.44 20.1l1.06-6.18L3 9.54l6.22-.91L12 3z"/></svg>',starFilled:'<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" stroke="none" d="m12 3 2.78 5.63L21 9.54l-4.5 4.38 1.06 6.18L12 17.18 6.44 20.1l1.06-6.18L3 9.54l6.22-.91L12 3z"/></svg>'};
 function playerFor(cam,video,overlay,status,vwrap,playBtn,volumeWrap,volumeBtn,volume,fullBtn){
- let player=null,started=false;
+ let player=null,started=false,retryTimer=null,retryCount=0;
  const setPlayLabel=playing=>{playBtn.innerHTML=playing?ICONS.pause:ICONS.play;playBtn.title=playing?"Зупинити":"Відтворити";playBtn.setAttribute("aria-label",playBtn.title)};
+ const clearRetry=()=>{if(retryTimer){clearTimeout(retryTimer);retryTimer=null}};
  const showError=message=>{status.className="dot";video.classList.remove("playing");vwrap.classList.remove("has-video");overlay.classList.remove("hidden");overlay.textContent=message;toast(message,true)};
- const destroyPlayer=()=>{if(player){try{player.destroy()}catch{}player=null}players.delete(cam.id);started=false;video.pause();video.removeAttribute("src");video.load();video.classList.remove("playing");vwrap.classList.remove("has-video");overlay.classList.remove("hidden");setPlayLabel(false)};
- const start=()=>{
+ const destroyPlayer=()=>{clearRetry();if(player){try{player.destroy()}catch{}player=null}players.delete(cam.id);started=false;video.pause();video.removeAttribute("src");video.load();video.classList.remove("playing");vwrap.classList.remove("has-video");overlay.classList.remove("hidden");setPlayLabel(false)};
+ const retry=message=>{clearRetry();retryCount++;const delay=Math.min(1000*Math.pow(2,Math.min(retryCount,3)),8000);overlay.classList.remove("hidden");overlay.textContent=message||"Повторне підключення…";retryTimer=setTimeout(()=>{retryTimer=null;if(started){destroyPlayer();start()}},delay)};
+ const start=()=>{clearRetry();
   if(started){video.play().catch(()=>{});return}
   const playlist="/hls/"+cam.id+"/playlist.m3u8";
   const low=!!cfg.settings.low_latency;
@@ -140,20 +142,28 @@ function playerFor(cam,video,overlay,status,vwrap,playBtn,volumeWrap,volumeBtn,v
    manifestLoadingTimeOut:20000,manifestLoadingMaxRetry:12,manifestLoadingRetryDelay:1000,manifestLoadingMaxRetryTimeout:30000,levelLoadingMaxRetry:8,levelLoadingRetryDelay:1000,fragLoadingMaxRetry:8});
   players.set(cam.id,player);
   player.on(Hls.Events.ERROR,(event,data)=>{
-   if(data.fatal){
-    const reason=data.details||data.type||"невідома помилка",code=data.response&&data.response.code;
-    const http=code?" · HTTP "+code:"";
-    const message=reason==="manifestLoadError"?"Не вдалося завантажити HLS-плейлист"+http+". Потік може ще запускатися — натисни для повтору.":reason==="levelLoadError"?"Не вдалося завантажити список якості HLS"+http+". Натисни для повтору.":"Помилка HLS ("+reason+")"+http+". Перевір доступність потоку та натисни для повтору.";
-    if(code===401)showLogin();
-    toast(code===401?"Сесія завершилася. Увійди знову.":code===404?"HLS-ресурс ще не готовий (404)":code>=500?"Помилка сервера HLS (HTTP "+code+")":message,true);
-    destroyPlayer();showError(message);
+   if(!data.fatal)return;
+   const reason=data.details||data.type||"невідома помилка";
+   const code=data.response&&data.response.code;
+   if(code===401){showLogin();return}
+   if(data.type===Hls.ErrorTypes.NETWORK_ERROR){
+    retry("Потік тимчасово недоступний. Повторне підключення…");
+    return;
    }
+   if(data.type===Hls.ErrorTypes.MEDIA_ERROR){
+    try{player.recoverMediaError();return}catch{}
+   }
+   const http=code?" · HTTP "+code:"";
+   const message=code===404?"HLS-потік ще готується. Повторне підключення…":code>=500?"Помилка сервера HLS (HTTP "+code+"). Повторне підключення…":"Не вдалося відтворити HLS-потік"+http+". Натисни ▶, щоб спробувати ще раз.";
+   if(retryCount<5){retry(message);return}
+   destroyPlayer();showError(message);
   });
   player.loadSource(playlist+"?t="+Date.now());
   player.attachMedia(video);
   player.on(Hls.Events.MANIFEST_PARSED,()=>video.play().catch(()=>{overlay.classList.remove("hidden");overlay.textContent="Натисни ▶, щоб почати відтворення"}));
  };
- video.addEventListener("playing",()=>{status.className="dot live";video.classList.add("playing");vwrap.classList.add("has-video");overlay.classList.add("hidden");setPlayLabel(true)});
+ video.addEventListener("playing",()=>{clearRetry();retryCount=0;status.className="dot live";video.classList.add("playing");vwrap.classList.add("has-video");overlay.classList.add("hidden");setPlayLabel(true)});
+ video.addEventListener("error",()=>{if(!started)return;const code=video.error&&video.error.code;if(retryCount<5){retry("Потік тимчасово недоступний. Повторне підключення…");return}showError("Не вдалося відтворити відео"+(code?" (код "+code+")":"")+". Натисни ▶, щоб спробувати ще раз.")});
  video.addEventListener("pause",()=>setPlayLabel(false));
  playBtn.onclick=()=>{if(!started){start();return}if(video.paused){video.play().catch(()=>{});return}destroyPlayer();overlay.textContent="Натисни ▶, щоб переглянути відео"};
  const initialVolume=Number(volume.value);video.volume=initialVolume;video.muted=initialVolume===0;volume.value=String(initialVolume);
