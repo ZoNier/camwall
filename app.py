@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import re
 import os
 import re
 import shutil
@@ -139,6 +138,7 @@ class CameraStream:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=8)
             if proc.returncode != 0:
                 detail = (stderr or b"").decode("utf-8", "replace").strip()
+                detail = re.sub(r"(?i)(rtsps?://)[^/@\s]+@", r"\1[credentials]@", detail)
                 self.last_error = "ffprobe failed" + (f": {detail[-500:]}" if detail else "")
                 log.warning("Codec probe failed camera=%d exit=%s: %s",
                             self.camera_id, proc.returncode, detail[-500:] or "(no details)")
@@ -314,6 +314,11 @@ class CameraStream:
                 if stderr_task and not stderr_task.done():
                     with suppress(asyncio.CancelledError):
                         await stderr_task
+                if self.last_error and self.last_error.startswith("No HLS segment produced"):
+                    details = " | ".join(self.ffmpeg_stderr)
+                    if details:
+                        self.last_error += f": {details}"
+                        log.warning("HLS stalled camera=%d stderr=%s", self.camera_id, details)
             self.state = "reconnecting"
             await asyncio.sleep(config.settings.reconnect_seconds)
 
