@@ -143,6 +143,7 @@ function playerFor(cam,video,overlay,status,vwrap,playBtn,volume,fullBtn){
     const reason=data.details||data.type||"невідома помилка",code=data.response&&data.response.code;
     const http=code?" · HTTP "+code:"";
     const message=reason==="manifestLoadError"?"Не вдалося завантажити HLS-плейлист"+http+". Потік може ще запускатися — натисни для повтору.":reason==="levelLoadError"?"Не вдалося завантажити список якості HLS"+http+". Натисни для повтору.":"Помилка HLS ("+reason+")"+http+". Перевір доступність потоку та натисни для повтору.";
+    if(code===401)showLogin();
     toast(code===401?"Сесія завершилася. Увійди знову.":code===404?"HLS-ресурс ще не готовий (404)":code>=500?"Помилка сервера HLS (HTTP "+code+")":message,true);
     destroyPlayer();showError(message);
    }
