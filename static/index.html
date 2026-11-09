@@ -106,7 +106,7 @@ async function api(url,opts={}){
   const raw=await r.text();let body={};try{body=raw?JSON.parse(raw):{}}catch{}
   if(!r.ok){
    const messages={400:"Некоректний запит",401:"Сесія завершилася. Увійди знову.",403:"Доступ заборонено",404:"Запитаний ресурс не знайдено",409:"Конфлікт даних",422:"Перевір правильність введених даних",429:"Забагато запитів. Спробуй трохи пізніше"};
-   const detail=typeof body.detail==="string"?body.detail:"";const error=new Error(detail||messages[r.status]||("Помилка сервера: HTTP "+r.status));error.status=r.status;error.url=url;
+   const detail=typeof body.detail==="string"?body.detail:"";const message=r.status>=500?("Помилка сервера (HTTP "+r.status+")"):(detail||messages[r.status]||("Помилка HTTP "+r.status));const error=new Error(message);error.status=r.status;error.url=url;
    if(r.status===401&&url!=="/api/auth/login")showLogin();throw error;
   }
   return body;
