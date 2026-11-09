@@ -139,7 +139,13 @@ function playerFor(cam,video,overlay,status,vwrap,playBtn,volume,fullBtn){
    manifestLoadingTimeOut:20000,manifestLoadingMaxRetry:12,manifestLoadingRetryDelay:1000,manifestLoadingMaxRetryTimeout:30000,levelLoadingMaxRetry:8,levelLoadingRetryDelay:1000,fragLoadingMaxRetry:8});
   players.set(cam.id,player);
   player.on(Hls.Events.ERROR,(event,data)=>{
-   if(data.fatal){const reason=data.details||data.type||"невідома помилка";const http=data.response&&data.response.code?" · HTTP "+data.response.code:"";destroyPlayer();const message=reason==="manifestLoadError"?"Не вдалося завантажити HLS-плейлист"+http+". Потік може ще запускатися — натисни для повтору.":reason==="levelLoadError"?"Не вдалося завантажити список якості HLS"+http+". Натисни для повтору.":"Помилка HLS ("+reason+")"+http+". Перевір доступність потоку та натисни для повтору.";showError(message)}
+   if(data.fatal){
+    const reason=data.details||data.type||"невідома помилка",code=data.response&&data.response.code;
+    const http=code?" · HTTP "+code:"";
+    const message=reason==="manifestLoadError"?"Не вдалося завантажити HLS-плейлист"+http+". Потік може ще запускатися — натисни для повтору.":reason==="levelLoadError"?"Не вдалося завантажити список якості HLS"+http+". Натисни для повтору.":"Помилка HLS ("+reason+")"+http+". Перевір доступність потоку та натисни для повтору.";
+    toast(code===401?"Сесія завершилася. Увійди знову.":code===404?"HLS-ресурс ще не готовий (404)":code>=500?"Помилка сервера HLS (HTTP "+code+")":message,true);
+    destroyPlayer();showError(message);
+   }
   });
   player.loadSource(playlist+"?t="+Date.now());
   player.attachMedia(video);
