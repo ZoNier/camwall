@@ -580,19 +580,12 @@ async def get_preview(camera_id: int, request: Request):
     stream = manager.streams.get(camera_id)
     if stream is None or stream.preview is None:
         raise HTTPException(status_code=404, detail="Preview is not ready")
-    etag = f'"{stream.preview_etag}"' if stream.preview_etag else None
-    if etag and request.headers.get("if-none-match") == etag:
-        return Response(status_code=304, headers={
-            "ETag": etag, "Cache-Control": "private, max-age=20"
-        })
     headers = {
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
         "Pragma": "no-cache",
         "Expires": "0",
         "Surrogate-Control": "no-store",
     }
-    if etag:
-        headers["ETag"] = etag
     return Response(content=stream.preview, media_type="image/jpeg", headers=headers)
 
 
