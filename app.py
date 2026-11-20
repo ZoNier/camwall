@@ -263,9 +263,15 @@ class CameraStream:
             last_segment_mtime = 0
             start_time = time.monotonic()
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    *args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.PIPE, start_new_session=True)
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        *args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.PIPE, start_new_session=True)
+                except FileNotFoundError:
+                    self.state = "error"
+                    self.last_error = f"FFmpeg executable not found: {FFMPEG}"
+                    log.exception("Cannot start FFmpeg executable: %s", FFMPEG)
+                    return
                 self.process = proc
                 stderr_task = asyncio.create_task(self.capture_stderr(proc.stderr),
                                                   name=f"camwall-stderr-{self.camera_id}")
@@ -273,21 +279,29 @@ class CameraStream:
                          self.camera_id, self.codec, proc.pid, segment_seconds)
                 while proc.returncode is None:
                     await asyncio.sleep(1)
-                    segments = list(self.hls_dir.glob("segment_*.m4s"))
-                    if segments:
-                        newest = max(segments, key=lambda p: p.stat().st_mtime_ns)
-                        mtime = newest.stat().st_mtime_ns
-                        if newest.stat().st_size > 0 and mtime != last_segment_mtime:
-                            last_segment_mtime = mtime
-                            self.last_data_at = time.monotonic()
-                            if self.state != "live":
-                                self.state = "live"
-                                self.last_error = None
-                                log.info("HLS segment produced camera=%d", self.camera_id)
-                                if not self.probe_attempted and self.probe_task is None:
-                                    self.probe_attempted = True
-                                    self.probe_task = asyncio.create_task(
-                                        self.probe(camera.url), name=f"camwall-probe-{self.camera_id}")
+                    # FFmpeg may delete an old HLS segment between glob() and stat().
+                    # Ignore that expected race instead of terminating the camera task.
+                    newest_mtime = 0
+                    newest_size = 0
+                    for segment in self.hls_dir.glob("segment_*.m4s"):
+                        try:
+                            stat = segment.stat()
+                        except FileNotFoundError:
+                            continue
+                        if stat.st_mtime_ns > newest_mtime:
+                            newest_mtime = stat.st_mtime_ns
+                            newest_size = stat.st_size
+                    if newest_size > 0 and newest_mtime != last_segment_mtime:
+                        last_segment_mtime = newest_mtime
+                        self.last_data_at = time.monotonic()
+                        if self.state != "live":
+                            self.state = "live"
+                            self.last_error = None
+                            log.info("HLS segment produced camera=%d", self.camera_id)
+                            if not self.probe_attempted and self.probe_task is None:
+                                self.probe_attempted = True
+                                self.probe_task = asyncio.create_task(
+                                    self.probe(camera.url), name=f"camwall-probe-{self.camera_id}")
                     idle = (time.monotonic() - self.last_data_at
                             if self.last_data_at is not None else time.monotonic() - start_time)
                     if idle > 30:
@@ -302,11 +316,6 @@ class CameraStream:
                     self.last_error = f"FFmpeg exited with code {proc.returncode}" + (f": {details}" if details else "")
                     log.warning("FFmpeg exited camera=%d code=%s stderr=%s",
                                 self.camera_id, proc.returncode, details or "(empty)")
-            except FileNotFoundError:
-                self.state = "error"
-                self.last_error = "FFmpeg executable not found"
-                log.exception("FFmpeg executable not found: %s", FFMPEG)
-                return
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
