@@ -245,7 +245,7 @@ class CameraStream:
             self.probe_attempted = False
             segment_seconds = "1" if config.settings.low_latency else "2"
             args = [FFMPEG, "-hide_banner", "-loglevel", "warning", "-nostdin",
-                    "-rtsp_transport", "tcp", "-rw_timeout", "15000000",
+                    "-rtsp_transport", "tcp", "-timeout", "15000000",
                     "-fflags", "+discardcorrupt",
                     "-i", camera.url, "-map", "0:v:0", "-c:v", "copy"]
             if camera.audio:
