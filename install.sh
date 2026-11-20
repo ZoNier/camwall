@@ -26,7 +26,7 @@ if ! id "$APP_USER" >/dev/null 2>&1; then
   useradd --system --home-dir "$INSTALL_DIR" --shell /usr/sbin/nologin "$APP_USER"
 fi
 
-install -d -o "$APP_USER" -g "$APP_USER" -m 0750 "$INSTALL_DIR" "$INSTALL_DIR/static" "$INSTALL_DIR/static/vendor" "$INSTALL_DIR/hls"
+install -d -o "$APP_USER" -g "$APP_USER" -m 0750 "$INSTALL_DIR" "$INSTALL_DIR/static" "$INSTALL_DIR/static/vendor"
 
 # Preserve existing camera and UI configuration on reinstall.
 if [[ ! -f "$INSTALL_DIR/playlist.json" ]]; then
