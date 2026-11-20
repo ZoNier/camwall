@@ -233,7 +233,7 @@ class CameraStream:
                 self.state = "disabled"
                 return
             self.state = "connecting"
-            self.run_token = str(time.time_ns())
+            self.run_token = time.strftime("%Y%m%dT%H%M%S", time.gmtime()) + f"_{time.time_ns() % 1_000_000_000:09d}"
             init_filename = f"init_{self.run_token}.mp4"
             self.last_data_at = None
             self.ffmpeg_stderr.clear()
@@ -585,7 +585,12 @@ async def get_preview(camera_id: int, request: Request):
         return Response(status_code=304, headers={
             "ETag": etag, "Cache-Control": "private, max-age=20"
         })
-    headers = {"Cache-Control": "no-store, max-age=0"}
+    headers = {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+        "Surrogate-Control": "no-store",
+    }
     if etag:
         headers["ETag"] = etag
     return Response(content=stream.preview, media_type="image/jpeg", headers=headers)
@@ -626,7 +631,7 @@ async def put_config(payload: dict[str, Any], request: Request):
 @app.get("/hls/{camera_id}/{filename}")
 async def get_hls_file(camera_id: int, filename: str, request: Request):
     require_login(request)
-    if filename != "playlist.m3u8" and not re.fullmatch(r"init_\d+\.mp4|segment_\d+_\d{9}\.m4s", filename):
+    if filename != "playlist.m3u8" and not re.fullmatch(r"init_\d{8}T\d{6}_\d{9}\.mp4|segment_\d{8}T\d{6}_\d{9}_\d{9}\.m4s", filename):
         raise HTTPException(status_code=404, detail="HLS resource not found")
     if camera_id < 0 or camera_id >= len(config.cameras) or not config.cameras[camera_id].enabled:
         raise HTTPException(status_code=404, detail="Camera not found")
@@ -635,8 +640,13 @@ async def get_hls_file(camera_id: int, filename: str, request: Request):
         raise HTTPException(status_code=404, detail="HLS resource is not ready")
     media_type = ("application/vnd.apple.mpegurl" if filename == "playlist.m3u8"
                   else "video/mp4")
-    cache_control = "no-store, max-age=0"
-    return FileResponse(path, media_type=media_type,
-                        headers={"Cache-Control": cache_control, "X-Content-Type-Options": "nosniff"})
+    no_cache_headers = {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+        "Surrogate-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    return FileResponse(path, media_type=media_type, headers=no_cache_headers)
 
 
