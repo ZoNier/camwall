@@ -202,8 +202,9 @@ class CameraStream:
                 proc = None
                 try:
                     args = [FFMPEG, "-hide_banner", "-loglevel", "error",
-                            "-skip_frame", "nokey", "-i", str(preview_input), "-an", "-frames:v", "1",
-                            "-vf", "scale=480:-2", "-q:v", "7",
+                            "-i", str(preview_input), "-an",
+                            # Reverse the short segment so the first emitted frame is its newest decoded frame.
+                            "-vf", "reverse,scale=480:-2", "-frames:v", "1", "-q:v", "7",
                             "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
                     proc = await asyncio.create_subprocess_exec(
                         *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
@@ -244,7 +245,8 @@ class CameraStream:
             self.probe_attempted = False
             segment_seconds = "1" if config.settings.low_latency else "2"
             args = [FFMPEG, "-hide_banner", "-loglevel", "warning", "-nostdin",
-                    "-rtsp_transport", "tcp", "-fflags", "nobuffer", "-flags", "low_delay",
+                    "-rtsp_transport", "tcp", "-rw_timeout", "15000000",
+                    "-fflags", "+discardcorrupt",
                     "-i", camera.url, "-map", "0:v:0", "-c:v", "copy"]
             if camera.audio:
                 args += ["-map", "0:a:0?", "-c:a", "copy"]
