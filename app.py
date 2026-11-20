@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -120,7 +119,6 @@ class CameraStream:
         self.process: asyncio.subprocess.Process | None = None
         self.hls_dir = HLS_DIR / str(camera_id)
         self.preview: bytes | None = None
-        self.preview_etag: str | None = None
         self.ffmpeg_stderr: deque[str] = deque(maxlen=20)
         self.state = "starting"
         self.codec = "unknown"
@@ -212,7 +210,6 @@ class CameraStream:
                     stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
                     if stdout.startswith(bytes((255, 216))):
                         self.preview = stdout
-                        self.preview_etag = hashlib.sha256(stdout).hexdigest()
                 except asyncio.CancelledError:
                     if proc and proc.returncode is None:
                         proc.kill()
