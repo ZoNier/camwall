@@ -15,7 +15,6 @@ Environment=CAMWALL_SETTINGS=/opt/camwall/settings.json
 Environment=CAMWALL_HLS_DIR=/run/camwall/hls
 RuntimeDirectory=camwall
 RuntimeDirectoryMode=0750
-RuntimeDirectorySize=512M
 Environment=CAMWALL_FFMPEG=/usr/bin/ffmpeg
 ExecStart=/opt/camwall/venv/bin/uvicorn app:app --host 0.0.0.0 --port 8080
 Restart=on-failure
