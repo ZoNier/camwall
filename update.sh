@@ -60,6 +60,9 @@ for file in app.py requirements.txt settings.example.json playlist.example.json 
 done
 
 echo "Оновлюю файли застосунку (камери та settings.json не перезаписуються)..."
+# HLS media is now transient under /run; remove the former persistent disk cache.
+systemctl stop "$SERVICE" 2>/dev/null || true
+rm -rf "$INSTALL_DIR/hls"
 install -d -o camwall -g camwall -m 0750 "$INSTALL_DIR" "$INSTALL_DIR/static" "$INSTALL_DIR/static/vendor"
 
 if [[ ! -f "$INSTALL_DIR/playlist.json" ]]; then
