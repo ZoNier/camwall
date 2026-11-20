@@ -129,6 +129,7 @@ class CameraStream:
         self.last_error: str | None = None
         self.last_data_at: float | None = None
         self.probe_attempted = False
+        self.run_token: str | None = None
 
     async def probe(self, url: str) -> None:
         args = [FFPROBE, "-v", "error", "-rtsp_transport", "tcp", "-select_streams", "v:0",
@@ -185,15 +186,17 @@ class CameraStream:
         """Create an occasional JPEG preview from the latest already-generated HLS segment."""
         await asyncio.sleep(5 + (self.camera_id % 7) * 2)
         while True:
-            await asyncio.sleep(25)
+            await asyncio.sleep(12)
             try:
-                segments = sorted(self.hls_dir.glob("segment_*.m4s"), key=lambda p: p.stat().st_mtime_ns)
+                if not self.run_token:
+                    continue
+                segments = sorted(self.hls_dir.glob(f"segment_{self.run_token}_*.m4s"), key=lambda p: p.stat().st_mtime_ns)
                 if not segments:
                     continue
                 segment = segments[-1]
                 if segment.stat().st_size < 188 * 10:
                     continue
-                init_segment = self.hls_dir / "init.mp4"
+                init_segment = self.hls_dir / f"init_{self.run_token}.mp4"
                 if not init_segment.is_file():
                     continue
                 preview_input = self.hls_dir / ".preview-input.mp4"
@@ -230,6 +233,8 @@ class CameraStream:
                 self.state = "disabled"
                 return
             self.state = "connecting"
+            self.run_token = str(time.time_ns())
+            init_filename = f"init_{self.run_token}.mp4"
             self.last_data_at = None
             self.ffmpeg_stderr.clear()
             self.codec = "unknown"
@@ -251,8 +256,8 @@ class CameraStream:
             args += ["-f", "hls", "-hls_time", segment_seconds, "-hls_list_size", "6",
                      "-hls_delete_threshold", "2",
                      "-hls_flags", "delete_segments+omit_endlist+independent_segments+temp_file",
-                     "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
-                     "-hls_segment_filename", str(self.hls_dir / "segment_%09d.m4s"),
+                     "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", init_filename,
+                     "-hls_segment_filename", str(self.hls_dir / f"segment_{self.run_token}_%09d.m4s"),
                      str(self.hls_dir / "playlist.m3u8")]
             proc = None
             stderr_task = None
@@ -580,7 +585,7 @@ async def get_preview(camera_id: int, request: Request):
         return Response(status_code=304, headers={
             "ETag": etag, "Cache-Control": "private, max-age=20"
         })
-    headers = {"Cache-Control": "private, max-age=20, stale-while-revalidate=10"}
+    headers = {"Cache-Control": "no-store, max-age=0"}
     if etag:
         headers["ETag"] = etag
     return Response(content=stream.preview, media_type="image/jpeg", headers=headers)
@@ -621,7 +626,7 @@ async def put_config(payload: dict[str, Any], request: Request):
 @app.get("/hls/{camera_id}/{filename}")
 async def get_hls_file(camera_id: int, filename: str, request: Request):
     require_login(request)
-    if filename not in ("playlist.m3u8", "init.mp4") and not re.fullmatch(r"segment_\d{9}\.m4s", filename):
+    if filename != "playlist.m3u8" and not re.fullmatch(r"init_\d+\.mp4|segment_\d+_\d{9}\.m4s", filename):
         raise HTTPException(status_code=404, detail="HLS resource not found")
     if camera_id < 0 or camera_id >= len(config.cameras) or not config.cameras[camera_id].enabled:
         raise HTTPException(status_code=404, detail="Camera not found")
@@ -630,7 +635,7 @@ async def get_hls_file(camera_id: int, filename: str, request: Request):
         raise HTTPException(status_code=404, detail="HLS resource is not ready")
     media_type = ("application/vnd.apple.mpegurl" if filename == "playlist.m3u8"
                   else "video/mp4")
-    cache_control = "no-store, max-age=0" if filename == "playlist.m3u8" else "private, no-cache"
+    cache_control = "no-store, max-age=0"
     return FileResponse(path, media_type=media_type,
                         headers={"Cache-Control": cache_control, "X-Content-Type-Options": "nosniff"})
 
