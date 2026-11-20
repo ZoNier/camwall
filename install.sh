@@ -27,6 +27,9 @@ if ! id "$APP_USER" >/dev/null 2>&1; then
 fi
 
 install -d -o "$APP_USER" -g "$APP_USER" -m 0750 "$INSTALL_DIR" "$INSTALL_DIR/static" "$INSTALL_DIR/static/vendor"
+# Stop an existing instance before removing its former on-disk HLS cache.
+systemctl stop "$SERVICE" 2>/dev/null || true
+rm -rf "$INSTALL_DIR/hls"
 
 # Preserve existing camera and UI configuration on reinstall.
 if [[ ! -f "$INSTALL_DIR/playlist.json" ]]; then
