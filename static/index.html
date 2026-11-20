@@ -161,6 +161,17 @@ function playerFor(cam,video,overlay,status,vwrap,playBtn,volumeWrap,volumeBtn,v
    maxLiveSyncPlaybackRate:1.25,backBufferLength:30,maxBufferLength:low?8:20,
    manifestLoadingTimeOut:20000,manifestLoadingMaxRetry:12,manifestLoadingRetryDelay:1000,manifestLoadingMaxRetryTimeout:30000,levelLoadingMaxRetry:8,levelLoadingRetryDelay:1000,fragLoadingMaxRetry:8});
   players.set(cam.id,player);
+  let lastLiveCorrection=0;
+  player.on(Hls.Events.LEVEL_UPDATED,()=>{
+   if(video.paused||!started||!Number.isFinite(player.liveSyncPosition))return;
+   const lag=player.liveSyncPosition-video.currentTime;
+   const now=Date.now();
+   // Correct only substantial drift; never interfere with a user-paused player.
+   if(lag>10&&now-lastLiveCorrection>5000){
+    lastLiveCorrection=now;
+    try{video.currentTime=Math.max(0,player.liveSyncPosition-0.5)}catch{}
+   }
+  });
   player.on(Hls.Events.ERROR,(event,data)=>{
    if(!data.fatal)return;
    const reason=data.details||data.type||"невідома помилка";
